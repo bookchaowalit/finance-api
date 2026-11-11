@@ -623,3 +623,42 @@ def test_an_error_in_load_month_cancels_the_other_sources(cells, monkeypatch):
 
     _asyncio.run(run())
     assert finished == []
+
+
+def test_a_failing_source_cancels_the_transactions_read(cells, monkeypatch):
+    """SPEC-002 AC-07: if one alongside load fails, the transactions read is cancelled too."""
+    import asyncio as _asyncio
+
+    finished: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host.startswith("transactions."):
+            await _asyncio.sleep(0.3)
+            finished.append("transactions")
+        return cells.handler(request)
+
+    client = CellClient(CELLS, transport=httpx.MockTransport(handler), timeout=2.0)
+    real = client.list_all
+
+    async def list_all(http, cell, *a, **k):
+        if cell == "tax":
+            await _asyncio.sleep(0.05)  # fail while transactions is in flight
+            raise RuntimeError("tax blew up")
+        return await real(http, cell, *a, **k)
+
+    monkeypatch.setattr(client, "list_all", list_all)
+    app = create_app(TokenVerifier(PUBLIC, ISSUER, "finance-api"), client)
+
+    async def run() -> None:
+        api = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://finance"
+        )
+        async with api:
+            with pytest.raises(RuntimeError, match="tax blew up"):
+                await api.get(
+                    "/v1/overview", params={"month": "2026-11"}, headers=auth()
+                )
+        await _asyncio.sleep(0.5)  # an orphaned transactions read would finish here
+
+    _asyncio.run(run())
+    assert finished == []
