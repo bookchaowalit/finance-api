@@ -555,3 +555,31 @@ def test_the_deadline_covers_the_whole_cell_call():
     assert _asyncio.run(run()) == "timeout"
     assert _time.monotonic() - t0 < 0.5
     assert client._inflight._value == client.max_inflight  # slot given back
+
+
+def test_a_slow_unrelated_cell_does_not_delay_the_transactions_read(cells):
+    """SPEC-002 AC-07: only the plans gate the transactions window; the other sources load
+    alongside, so one slow cell (tax) costs one cell timeout, not two in a row."""
+    import asyncio as _asyncio
+    import time as _time
+
+    t0 = _time.monotonic()
+    tx_at: list[float] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host.split(".")[0]
+        if host == "tax":
+            await _asyncio.sleep(0.6)
+        if host == "transactions":
+            tx_at.append(_time.monotonic() - t0)
+        return cells.handler(request)
+
+    app = create_app(
+        TokenVerifier(PUBLIC, ISSUER, "finance-api"),
+        CellClient(CELLS, transport=httpx.MockTransport(handler), timeout=2.0),
+    )
+    r = TestClient(app).get("/v1/overview", params={"month": "2026-11"}, headers=auth())
+    assert r.status_code == 200
+    assert r.json()["tax"]["ok"] is True
+    (at,) = tx_at
+    assert at < 0.4  # read while tax was still answering
