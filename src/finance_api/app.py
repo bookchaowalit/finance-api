@@ -7,6 +7,7 @@ alias from the real annotation objects.
 import asyncio
 import math
 import os
+import threading
 import time
 from collections import deque
 from collections.abc import Callable
@@ -76,22 +77,25 @@ class RateLimiter:
             raise ValueError("per_minute must be at least 1")
         self.per_minute, self.clock = per_minute, clock
         self.hits: dict[tuple[str, str], deque[float]] = {}
+        # FastAPI runs the sync auth dependency in a threadpool: check() must be atomic.
+        self._lock = threading.Lock()
 
     def check(self, principal: Principal) -> float:
         """0 when allowed (and counted), else seconds until the next slot."""
-        now = self.clock()
-        cutoff = now - self.WINDOW
-        for key in [k for k, q in self.hits.items() if not q or q[-1] <= cutoff]:
-            del self.hits[key]  # forget idle subjects so memory stays bounded
-        q = self.hits.setdefault(
-            (str(principal.workspace), str(principal.actor)), deque()
-        )
-        while q and q[0] <= cutoff:
-            q.popleft()
-        if len(q) >= self.per_minute:
-            return q[0] + self.WINDOW - now
-        q.append(now)
-        return 0.0
+        with self._lock:
+            now = self.clock()
+            cutoff = now - self.WINDOW
+            for key in [k for k, q in self.hits.items() if not q or q[-1] <= cutoff]:
+                del self.hits[key]  # forget idle subjects so memory stays bounded
+            q = self.hits.setdefault(
+                (str(principal.workspace), str(principal.actor)), deque()
+            )
+            while q and q[0] <= cutoff:
+                q.popleft()
+            if len(q) >= self.per_minute:
+                return q[0] + self.WINDOW - now
+            q.append(now)
+            return 0.0
 
 
 def create_app(
