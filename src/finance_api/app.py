@@ -156,6 +156,7 @@ def create_app(
         ``names`` load alongside, so a slow unrelated cell doesn't delay transactions (AC-07)."""
         others = [n for n in names if n not in plans]
         rest = asyncio.ensure_future(load(principal, others))
+        tasks = [rest]
         try:
             d = await load(principal, plans)
             start, end = views.transaction_window((d[p].rows for p in plans), month)
@@ -164,15 +165,19 @@ def create_app(
                 bounds["transaction_date_from"] = start.isoformat()
             if end is not None:
                 bounds["transaction_date_to"] = end.isoformat()
-            tx = load(principal, ["transactions"], {"transactions": bounds})
+            tx = asyncio.ensure_future(
+                load(principal, ["transactions"], {"transactions": bounds})
+            )
+            tasks.append(tx)
             for part in await asyncio.gather(tx, rest):
                 d.update(part)
             return d
         finally:
-            if (
-                not rest.done()
-            ):  # any early exit: never leave cell calls running unowned
-                rest.cancel()
+            # Any early exit (gather doesn't cancel siblings when one fails):
+            # never leave cell calls running unowned.
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
 
     def section(
         needs: list[Loaded], build: Callable[[], dict[str, Any]]
