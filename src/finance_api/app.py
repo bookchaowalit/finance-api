@@ -240,6 +240,13 @@ def create_app(
             headers={"Retry-After": "30"},
         )
 
+    def spender(principal: Principal) -> None:
+        """Spending the workspace's credits takes the person's own token: no delegated (agent) token."""
+        if principal.delegation is not None:
+            raise HTTPException(
+                status_code=403, detail={"error": "delegated_token_refused"}
+            )
+
     def idempotency(key: str | None) -> str:
         if key is None or not re.fullmatch(r"[A-Za-z0-9_.:-]{8,100}", key):
             raise HTTPException(
@@ -607,6 +614,7 @@ def create_app(
             idempotency_key: Annotated[str | None, Header()] = None,
         ) -> dict[str, Any]:
             """SPEC-005 AC-03."""
+            spender(principal)
             key = idempotency(idempotency_key)
             try:
                 state, charged = await credits.buy(
@@ -646,6 +654,7 @@ def create_app(
             idempotency_key: Annotated[str | None, Header()] = None,
         ) -> JSONResponse:
             """SPEC-005 AC-02: the checkout URL goes to the caller only, never to a log."""
+            spender(principal)
             key = idempotency(idempotency_key)
             try:
                 order = await credits.topup(principal.workspace, payload.amount, key)

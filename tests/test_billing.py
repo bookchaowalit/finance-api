@@ -531,3 +531,20 @@ def test_pass_arithmetic_orders_by_instant_and_refuses_bad_rows():
     ):
         with pytest.raises(ValueError, match=r"hold row|captured_units"):
             pass_state(bad)
+
+
+def test_delegated_tokens_cannot_spend(fake):
+    client, _ = make(fake)
+    t = token(**{"del": str(uuid.uuid4())})
+    ws = jwt.decode(t, options={"verify_signature": False})["ws"]
+    fund(fake, ws, 100_000)
+    headers = {"Authorization": f"Bearer {t}"}
+    for path, body in (
+        ("/v1/billing/pass", {"months": 1}),
+        ("/v1/billing/topups", {"amount": 5_000}),
+    ):
+        r = client.post(path, headers=headers | key(), json=body)
+        assert r.status_code == 403
+        assert r.json() == {"detail": {"error": "delegated_token_refused"}}
+    assert fake.accounts[f"finance:{ws}"]["available"] == 100_000
+    assert not any(p.endswith(("/v1/holds", "/v1/topups")) for _, p in fake.calls)
