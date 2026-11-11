@@ -12,7 +12,10 @@ import httpx
 # Through the edge gateway (SPEC-001 AC-09): Cloudflare WAF and rate limit, and the signed
 # X-Gateway-Assertion the cells check, so the cells can refuse direct calls. Override with
 # FINANCE_API_CELLS. The names are the gateway route names (routes.json).
-GATEWAY = "https://gateway.bookchaowalit.com/v1"
+GATEWAY_HOST = "gateway.bookchaowalit.com"
+GATEWAY = f"https://{GATEWAY_HOST}/v1"
+# SPEC-003: lets these calls skip the Cloudflare per-IP limit (one IP serves every user); sent to the gateway only.
+EDGE_BYPASS_HEADER = "X-Edge-Bypass"
 DEFAULT_CELLS = {
     name: f"{GATEWAY}/{name}"
     for name in (
@@ -55,18 +58,26 @@ class CellClient:
         timeout: float = 20.0,
         page_cap: int = 10_000,
         max_inflight: int = 16,
+        edge_bypass: str | None = None,
     ) -> None:
         if max_inflight < 1:
             raise ValueError("max_inflight must be at least 1")
         self.urls = {
             name: _https(name, url) for name, url in (urls or DEFAULT_CELLS).items()
         }
+        self.edge_bypass = edge_bypass or None
         self.transport = transport
         self.timeout = timeout
         self.page_cap = page_cap
         # Bounds the fan-out of all requests in this process (SPEC-001 AC-10).
         self.max_inflight = max_inflight
         self._inflight = asyncio.Semaphore(max_inflight)
+
+    def _headers(self, cell: str, bearer: str) -> dict[str, str]:
+        headers = {"Authorization": f"Bearer {bearer}"}
+        if self.edge_bypass and urlsplit(self.urls[cell]).hostname == GATEWAY_HOST:
+            headers[EDGE_BYPASS_HEADER] = self.edge_bypass
+        return headers
 
     def session(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -117,7 +128,7 @@ class CellClient:
                     http.get(
                         f"{self.urls[cell]}/v1/{plural}",
                         params=params,
-                        headers={"Authorization": f"Bearer {bearer}"},
+                        headers=self._headers(cell, bearer),
                         timeout=left,
                     ),
                     left,

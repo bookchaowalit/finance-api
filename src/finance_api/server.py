@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
 import urllib.parse
 
 from finance_api.auth import JwksKeys, TokenVerifier, TrustedIssuer
@@ -63,9 +64,23 @@ def cells(env: dict[str, str] | os._Environ[str] = os.environ) -> CellClient:
     timeout = float(env.get(f"{PREFIX}_TIMEOUT_SECONDS", "20"))
     inflight = int(env.get(f"{PREFIX}_MAX_INFLIGHT", "16"))
     try:
-        return CellClient(urls, timeout=timeout, max_inflight=inflight)
+        return CellClient(
+            urls, timeout=timeout, max_inflight=inflight, edge_bypass=edge_bypass(env)
+        )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+
+
+def edge_bypass(env: dict[str, str] | os._Environ[str] = os.environ) -> str | None:
+    """SPEC-003: the secret that skips the Cloudflare per-IP limit; unset or empty = none."""
+    value = env.get(f"{PREFIX}_EDGE_BYPASS", "")
+    if not value:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", value):
+        raise SystemExit(
+            f"{PREFIX}_EDGE_BYPASS must be 32-256 characters of [A-Za-z0-9_-]"
+        )
+    return value
 
 
 def rate_per_minute(env: dict[str, str] | os._Environ[str] = os.environ) -> int:
