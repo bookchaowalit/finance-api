@@ -98,17 +98,24 @@ class CellClient:
                 for name, value in (filters or {}).items()
                 for item in (value if isinstance(value, list) else [value])
             )
+            # Waiting for a slot counts against the timeout too, so busy or slow cells can't
+            # hold this request past it (AC-04).
             try:
-                async with self._inflight:
-                    response = await http.get(
-                        f"{self.urls[cell]}/v1/{plural}",
-                        params=params,
-                        headers={"Authorization": f"Bearer {bearer}"},
-                    )
+                await asyncio.wait_for(self._inflight.acquire(), self.timeout)
+            except TimeoutError as exc:
+                raise CellError("timeout") from exc
+            try:
+                response = await http.get(
+                    f"{self.urls[cell]}/v1/{plural}",
+                    params=params,
+                    headers={"Authorization": f"Bearer {bearer}"},
+                )
             except httpx.TimeoutException as exc:
                 raise CellError("timeout") from exc
             except httpx.HTTPError as exc:
                 raise CellError("unreachable") from exc
+            finally:
+                self._inflight.release()  # also on error or cancellation
             if response.status_code in (401, 403):
                 raise CellError("forbidden")
             if response.status_code != 200:
