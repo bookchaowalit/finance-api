@@ -5,7 +5,10 @@ alias from the real annotation objects.
 """
 
 import asyncio
+import math
 import os
+import time
+from collections import deque
 from collections.abc import Callable
 from datetime import datetime
 from typing import Annotated, Any
@@ -57,7 +60,44 @@ class Loaded:
         self.rows, self.truncated, self.error = rows or [], truncated, error
 
 
-def create_app(verifier: TokenVerifier, cells: CellClient) -> FastAPI:
+class RateLimiter:
+    """Requests per subject (actor + workspace) in a sliding 60 s window (SPEC-001 AC-10).
+
+    One process, in memory: finance-api runs one replica. Each allowed request fans out to
+    the cells, so this caps what one token can make the cells and the gateway do.
+    """
+
+    WINDOW = 60.0
+
+    def __init__(
+        self, per_minute: int, clock: Callable[[], float] = time.monotonic
+    ) -> None:
+        if per_minute < 1:
+            raise ValueError("per_minute must be at least 1")
+        self.per_minute, self.clock = per_minute, clock
+        self.hits: dict[tuple[str, str], deque[float]] = {}
+
+    def check(self, principal: Principal) -> float:
+        """0 when allowed (and counted), else seconds until the next slot."""
+        now = self.clock()
+        cutoff = now - self.WINDOW
+        for key in [k for k, q in self.hits.items() if not q or q[-1] <= cutoff]:
+            del self.hits[key]  # forget idle subjects so memory stays bounded
+        q = self.hits.setdefault(
+            (str(principal.workspace), str(principal.actor)), deque()
+        )
+        while q and q[0] <= cutoff:
+            q.popleft()
+        if len(q) >= self.per_minute:
+            return q[0] + self.WINDOW - now
+        q.append(now)
+        return 0.0
+
+
+def create_app(
+    verifier: TokenVerifier, cells: CellClient, *, rate_per_minute: int = 12
+) -> FastAPI:
+    limiter = RateLimiter(rate_per_minute)
     app = FastAPI(
         title="finance-api",
         version="1.0.0",
@@ -68,11 +108,19 @@ def create_app(verifier: TokenVerifier, cells: CellClient) -> FastAPI:
 
     def caller(authorization: Annotated[str | None, Header()] = None) -> Principal:
         try:
-            return verifier.verify(authorization, None)
+            principal = verifier.verify(authorization, None)
         except Unauthenticated as exc:
             raise HTTPException(
                 status_code=401, detail={"error": "unauthenticated"}
             ) from exc
+        wait = limiter.check(principal)
+        if wait:
+            raise HTTPException(
+                status_code=429,
+                detail={"error": "rate_limited"},
+                headers={"Retry-After": str(max(1, math.ceil(wait)))},
+            )
+        return principal
 
     Caller = Annotated[Principal, Depends(caller)]
 

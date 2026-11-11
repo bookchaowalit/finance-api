@@ -2,24 +2,31 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 
-# Public production URLs (repository-catalog/registries/online-systems.yaml); override with FINANCE_API_CELLS.
+# Through the edge gateway (SPEC-001 AC-09): Cloudflare WAF and rate limit, and the signed
+# X-Gateway-Assertion the cells check, so the cells can refuse direct calls. Override with
+# FINANCE_API_CELLS. The names are the gateway route names (routes.json).
+GATEWAY = "https://gateway.bookchaowalit.com/v1"
 DEFAULT_CELLS = {
-    "finance-accounts": "https://finance-accounts-api-production.up.railway.app",
-    "transactions": "https://transactions-api-production-4078.up.railway.app",
-    "budgets": "https://budgets-api-production-690e.up.railway.app",
-    "cash-flow": "https://cash-flow-api-production.up.railway.app",
-    "reconciliations": "https://reconciliations-api-production.up.railway.app",
-    "business-assets": "https://business-assets-api-production.up.railway.app",
-    "investments": "https://investments-api-production.up.railway.app",
-    "liabilities": "https://liabilities-api-production.up.railway.app",
-    "subscriptions": "https://subscriptions-api-production-b1d4.up.railway.app",
-    "tax": "https://tax-api-production-57f6.up.railway.app",
+    name: f"{GATEWAY}/{name}"
+    for name in (
+        "finance-accounts",
+        "transactions",
+        "budgets",
+        "cash-flow",
+        "reconciliations",
+        "business-assets",
+        "investments",
+        "liabilities",
+        "subscriptions",
+        "tax",
+    )
 }
 PAGE_SIZE = 1000  # the cells' MAX_LIMIT
 
@@ -47,13 +54,19 @@ class CellClient:
         transport: httpx.AsyncBaseTransport | None = None,
         timeout: float = 20.0,
         page_cap: int = 10_000,
+        max_inflight: int = 16,
     ) -> None:
+        if max_inflight < 1:
+            raise ValueError("max_inflight must be at least 1")
         self.urls = {
             name: _https(name, url) for name, url in (urls or DEFAULT_CELLS).items()
         }
         self.transport = transport
         self.timeout = timeout
         self.page_cap = page_cap
+        # Bounds the fan-out of all requests in this process (SPEC-001 AC-10).
+        self.max_inflight = max_inflight
+        self._inflight = asyncio.Semaphore(max_inflight)
 
     def session(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -86,11 +99,12 @@ class CellClient:
                 for item in (value if isinstance(value, list) else [value])
             )
             try:
-                response = await http.get(
-                    f"{self.urls[cell]}/v1/{plural}",
-                    params=params,
-                    headers={"Authorization": f"Bearer {bearer}"},
-                )
+                async with self._inflight:
+                    response = await http.get(
+                        f"{self.urls[cell]}/v1/{plural}",
+                        params=params,
+                        headers={"Authorization": f"Bearer {bearer}"},
+                    )
             except httpx.TimeoutException as exc:
                 raise CellError("timeout") from exc
             except httpx.HTTPError as exc:

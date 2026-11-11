@@ -361,3 +361,79 @@ def test_net_worth_reads_every_transaction(client, cells):  # SPEC-002 AC-06
     client.get("/v1/net-worth", headers=auth())
     (sent,) = _tx_params(cells)
     assert not {"transaction_date_from", "transaction_date_to"} & set(sent)
+
+
+def test_a_subject_over_its_rate_is_refused_before_any_cell_call(cells):
+    """AC-10: per actor+workspace request budget; 429 with Retry-After, no fan-out."""
+    transport = httpx.MockTransport(cells.handler)
+    app = create_app(
+        TokenVerifier(PUBLIC, ISSUER, "finance-api"),
+        CellClient(CELLS, transport=transport, timeout=2.0, page_cap=250),
+        rate_per_minute=2,
+    )
+    c = TestClient(app)
+    me = token()
+    for _ in range(2):
+        assert c.get("/v1/net-worth", headers=auth(me)).status_code == 200
+    calls = len(cells.seen)
+    refused = c.get("/v1/overview", params={"month": "2026-11"}, headers=auth(me))
+    assert refused.status_code == 429
+    assert refused.json()["detail"]["error"] == "rate_limited"
+    assert int(refused.headers["retry-after"]) >= 1
+    assert len(cells.seen) == calls
+    # Another subject has its own budget; health is never limited.
+    assert c.get("/v1/net-worth", headers=auth(token())).status_code == 200
+    assert c.get("/health").status_code == 200
+
+
+def test_upstream_calls_are_bounded(cells):
+    """AC-10: at most max_inflight cell requests at once per process."""
+    import asyncio as _asyncio
+
+    state = {"now": 0, "peak": 0}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        state["now"] += 1
+        state["peak"] = max(state["peak"], state["now"])
+        await _asyncio.sleep(0.01)
+        state["now"] -= 1
+        return cells.handler(request)
+
+    app = create_app(
+        TokenVerifier(PUBLIC, ISSUER, "finance-api"),
+        CellClient(
+            CELLS,
+            transport=httpx.MockTransport(handler),
+            timeout=2.0,
+            page_cap=250,
+            max_inflight=3,
+        ),
+    )
+    assert (
+        TestClient(app)
+        .get("/v1/overview", params={"month": "2026-11"}, headers=auth())
+        .status_code
+        == 200
+    )
+    assert state["peak"] == 3
+
+
+def test_a_gateway_base_keeps_its_path():
+    """AC-09: base https://gateway/v1/<cell> + /v1/<plural>."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"items": []})
+
+    app = create_app(
+        TokenVerifier(PUBLIC, ISSUER, "finance-api"),
+        CellClient(
+            {n: f"https://gw.example/v1/{n}" for n in CELLS},
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+    assert TestClient(app).get("/v1/net-worth", headers=auth()).status_code == 200
+    paths = {r.url.path for r in seen}
+    assert "/v1/finance-accounts/v1/accounts" in paths
+    assert all(r.url.host == "gw.example" for r in seen)
