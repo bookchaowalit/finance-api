@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 import os
 import re
+import sys
 import urllib.parse
 
 from finance_api.auth import JwksKeys, TokenVerifier, TrustedIssuer
@@ -91,6 +93,20 @@ def rate_per_minute(env: dict[str, str] | os._Environ[str] = os.environ) -> int:
     return value
 
 
+def configure_logging() -> logging.Logger:
+    """The service's own INFO lines (SPEC-004 AC-08 audit) on stdout; uvicorn sets up only its own."""
+    logger = logging.getLogger("finance_api")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+        )
+        logger.addHandler(handler)
+    logger.propagate = False
+    return logger
+
+
 def run() -> None:
     import uvicorn
 
@@ -99,6 +115,7 @@ def run() -> None:
     from finance_api.app import create_app
 
     init_sentry()
+    configure_logging()
     # platform-api-gateway SPEC-002: off until the gateway owner sets GATEWAY_ASSERTION_MODE/KEY.
     check = gateway.GatewayCheck.from_env(gateway.SYSTEM)
     app = create_app(verifier(), cells(), rate_per_minute=rate_per_minute())

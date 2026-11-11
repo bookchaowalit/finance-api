@@ -32,10 +32,11 @@ DEFAULT_CELLS = {
     )
 }
 PAGE_SIZE = 1000  # the cells' MAX_LIMIT
+ERASE_BATCH = 500  # the cells' largest erase batch (SPEC-008)
 
 
 class CellError(Exception):
-    """A cell could not answer: ``timeout``, ``unreachable``, ``forbidden`` or ``cell_error``."""
+    """A cell could not answer: ``timeout``, ``unreachable``, ``forbidden``, ``unavailable`` or ``cell_error``."""
 
     def __init__(self, kind: str) -> None:
         super().__init__(kind)
@@ -84,6 +85,49 @@ class CellClient:
             transport=self.transport, timeout=self.timeout, follow_redirects=False
         )
 
+    async def _send(
+        self,
+        http: httpx.AsyncClient,
+        method: str,
+        cell: str,
+        path: str,
+        bearer: str,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        """One cell request under a shared slot and one deadline (AC-04); errors as CellError."""
+        if cell not in self.urls:
+            raise CellError("unreachable")
+        # Waiting for a slot counts against the timeout too, so busy or slow cells can't
+        # hold this request past it.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.timeout
+        try:
+            await asyncio.wait_for(self._inflight.acquire(), self.timeout)
+        except TimeoutError as exc:
+            raise CellError("timeout") from exc
+        try:
+            left = deadline - loop.time()
+            if left <= 0:
+                raise CellError("timeout")
+            # httpx's timeout is per connect/read/write; wait_for bounds the whole call,
+            # so a trickling body can't run past the deadline.
+            return await asyncio.wait_for(
+                http.request(
+                    method,
+                    f"{self.urls[cell]}{path}",
+                    headers=self._headers(cell, bearer),
+                    timeout=left,
+                    **kwargs,
+                ),
+                left,
+            )
+        except (httpx.TimeoutException, TimeoutError) as exc:
+            raise CellError("timeout") from exc
+        except httpx.HTTPError as exc:
+            raise CellError("unreachable") from exc
+        finally:
+            self._inflight.release()  # also on error or cancellation
+
     async def list_all(
         self,
         http: httpx.AsyncClient,
@@ -91,15 +135,16 @@ class CellClient:
         plural: str,
         bearer: str,
         filters: Mapping[str, str | list[str]] | None = None,
+        *,
+        page_cap: int | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         """Every row (by id, paging with after_id) up to the cap; True when rows were left out."""
-        if cell not in self.urls:
-            raise CellError("unreachable")
+        cap = self.page_cap if page_cap is None else page_cap
         rows: list[dict[str, Any]] = []
         after = 0
         while True:
             # One more than still fits, to tell "exactly the cap" from "more than the cap".
-            limit = min(PAGE_SIZE, self.page_cap - len(rows) + 1)
+            limit = min(PAGE_SIZE, cap - len(rows) + 1)
             params: list[tuple[str, str | int | float | bool | None]] = [
                 ("limit", str(limit)),
                 ("after_id", str(after)),
@@ -109,36 +154,9 @@ class CellClient:
                 for name, value in (filters or {}).items()
                 for item in (value if isinstance(value, list) else [value])
             )
-            # Waiting for a slot counts against the timeout too, so busy or slow cells can't
-            # hold this request past it (AC-04).
-            # One deadline per cell request: the slot wait and the call share the timeout.
-            loop = asyncio.get_running_loop()
-            deadline = loop.time() + self.timeout
-            try:
-                await asyncio.wait_for(self._inflight.acquire(), self.timeout)
-            except TimeoutError as exc:
-                raise CellError("timeout") from exc
-            try:
-                left = deadline - loop.time()
-                if left <= 0:
-                    raise CellError("timeout")
-                # httpx's timeout is per connect/read/write; wait_for bounds the whole call,
-                # so a trickling body can't run past the deadline.
-                response = await asyncio.wait_for(
-                    http.get(
-                        f"{self.urls[cell]}/v1/{plural}",
-                        params=params,
-                        headers=self._headers(cell, bearer),
-                        timeout=left,
-                    ),
-                    left,
-                )
-            except (httpx.TimeoutException, TimeoutError) as exc:
-                raise CellError("timeout") from exc
-            except httpx.HTTPError as exc:
-                raise CellError("unreachable") from exc
-            finally:
-                self._inflight.release()  # also on error or cancellation
+            response = await self._send(
+                http, "GET", cell, f"/v1/{plural}", bearer, params=params
+            )
             if response.status_code in (401, 403):
                 raise CellError("forbidden")
             if response.status_code != 200:
@@ -148,8 +166,41 @@ class CellClient:
             except (ValueError, KeyError, TypeError) as exc:
                 raise CellError("cell_error") from exc
             rows.extend(page)
-            if len(rows) > self.page_cap:
-                return rows[: self.page_cap], True
+            if len(rows) > cap:
+                return rows[:cap], True
             if len(page) < limit or not page:
                 return rows, False
             after = int(page[-1]["id"])
+
+    async def erase(
+        self,
+        http: httpx.AsyncClient,
+        cell: str,
+        plural: str,
+        bearer: str,
+        workspace: str,
+        limit: int = ERASE_BATCH,
+    ) -> tuple[int, int]:
+        """One erase batch (cells' SPEC-008): (erased, remaining)."""
+        response = await self._send(
+            http,
+            "POST",
+            cell,
+            f"/v1/{plural}/erase",
+            bearer,
+            json={"confirm": workspace, "limit": limit},
+        )
+        if response.status_code in (401, 403):
+            raise CellError("forbidden")
+        if response.status_code == 503:
+            raise CellError("unavailable")
+        if response.status_code != 200:
+            raise CellError("cell_error")
+        try:
+            body = response.json()
+            erased, remaining = int(body["erased"]), int(body["remaining"])
+        except (ValueError, KeyError, TypeError) as exc:
+            raise CellError("cell_error") from exc
+        if erased < 0 or remaining < 0:
+            raise CellError("cell_error")
+        return erased, remaining

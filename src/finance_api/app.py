@@ -5,10 +5,13 @@ alias from the real annotation objects.
 """
 
 import asyncio
+import json
+import logging
 import math
 import os
 import threading
 import time
+import uuid
 from collections import deque
 from collections.abc import Callable
 from datetime import datetime
@@ -16,12 +19,68 @@ from typing import Annotated, Any
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict
 
 from finance_api import views
 from finance_api.auth import Principal, TokenVerifier, Unauthenticated
 from finance_api.cells import CellClient, CellError
 
 BANGKOK = ZoneInfo("Asia/Bangkok")
+log = logging.getLogger("finance_api")
+
+# SPEC-004: every resource of the ten cells, as (cell, plural).
+RESOURCES: list[tuple[str, str]] = [
+    ("finance-accounts", "accounts"),
+    ("transactions", "transactions"),
+    ("budgets", "budget-plans"),
+    ("cash-flow", "cashflow-plans"),
+    ("reconciliations", "reconciliations"),
+    ("business-assets", "assets"),
+    ("business-assets", "asset-metrics"),
+    ("investments", "investments"),
+    ("investments", "market-prices"),
+    ("investments", "valuations"),
+    ("liabilities", "liabilities"),
+    ("subscriptions", "subscriptions"),
+    ("subscriptions", "subscription-reviews"),
+    ("subscriptions", "subscription-aliases"),
+    ("tax", "tax-items"),
+]
+# Every resource is erased after everything that points at it (cells' references).
+ERASE_STAGES: list[list[tuple[str, str]]] = [
+    [
+        ("transactions", "transactions"),
+        ("reconciliations", "reconciliations"),
+        ("liabilities", "liabilities"),
+        ("investments", "valuations"),
+        ("business-assets", "asset-metrics"),
+        ("subscriptions", "subscription-reviews"),
+        ("subscriptions", "subscription-aliases"),
+        ("budgets", "budget-plans"),
+        ("cash-flow", "cashflow-plans"),
+        ("tax", "tax-items"),
+    ],
+    [
+        ("investments", "investments"),
+        ("investments", "market-prices"),
+        ("business-assets", "assets"),
+        ("subscriptions", "subscriptions"),
+    ],
+    [("finance-accounts", "accounts")],
+]
+EXPORT_CAP = 20_000  # records per resource
+EXPORT_DEADLINE = 70.0  # seconds; Cloudflare gives up at 100
+
+
+class EraseBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirm: str
+
+
+def _key(cell: str, plural: str) -> str:
+    return f"{cell}.{plural}"
+
 
 # (cell, plural, filters) per source the views read.
 SOURCES: dict[str, tuple[str, str, dict[str, str | list[str]]]] = {
@@ -62,20 +121,22 @@ class Loaded:
 
 
 class RateLimiter:
-    """Requests per subject (actor + workspace) in a sliding 60 s window (SPEC-001 AC-10).
+    """Requests per subject (actor + workspace) in a sliding window, 60 s unless given (SPEC-001 AC-10).
 
     One process, in memory: finance-api runs one replica. Each allowed request fans out to
     the cells, so this caps what one token can make the cells and the gateway do.
     """
 
-    WINDOW = 60.0
-
     def __init__(
-        self, per_minute: int, clock: Callable[[], float] = time.monotonic
+        self,
+        per_minute: int,
+        clock: Callable[[], float] = time.monotonic,
+        *,
+        window: float = 60.0,
     ) -> None:
         if per_minute < 1:
             raise ValueError("per_minute must be at least 1")
-        self.per_minute, self.clock = per_minute, clock
+        self.per_minute, self.clock, self.WINDOW = per_minute, clock, window
         self.hits: dict[tuple[str, str], deque[float]] = {}
         # FastAPI runs the sync auth dependency in a threadpool: check() must be atomic.
         self._lock = threading.Lock()
@@ -99,9 +160,21 @@ class RateLimiter:
 
 
 def create_app(
-    verifier: TokenVerifier, cells: CellClient, *, rate_per_minute: int = 12
+    verifier: TokenVerifier,
+    cells: CellClient,
+    *,
+    rate_per_minute: int = 12,
+    export_cap: int = EXPORT_CAP,
+    erase_budget: float = 60.0,
+    erase_pause: float = 3.0,
+    export_deadline: float = EXPORT_DEADLINE,
 ) -> FastAPI:
     limiter = RateLimiter(rate_per_minute)
+    # SPEC-004 AC-07: export and erase read or change everything; each has its own window.
+    export_limiter = RateLimiter(3, window=600.0)
+    erase_limiter = RateLimiter(10, window=600.0)
+    # One export at a time per replica: it holds every record of a workspace in memory.
+    exporting = asyncio.Semaphore(1)
     app = FastAPI(
         title="finance-api",
         version="1.0.0",
@@ -127,6 +200,28 @@ def create_app(
         return principal
 
     Caller = Annotated[Principal, Depends(caller)]
+
+    def limited(window: RateLimiter, principal: Principal) -> None:
+        wait = window.check(principal)
+        if wait:
+            raise HTTPException(
+                status_code=429,
+                detail={"error": "rate_limited"},
+                headers={"Retry-After": str(max(1, math.ceil(wait)))},
+            )
+
+    def audit(event: str, principal: Principal, **fields: Any) -> None:
+        # SPEC-004 AC-08: who and what, never record content or the token.
+        log.info(
+            json.dumps(
+                {
+                    "event": event,
+                    "actor": str(principal.actor),
+                    "workspace": str(principal.workspace),
+                    **fields,
+                }
+            )
+        )
 
     async def load(
         principal: Principal,
@@ -295,5 +390,143 @@ def create_app(
             ),
             "truncated": any(d[n].truncated for n in names),
         }
+
+    @app.get("/v1/export")
+    async def export(principal: Caller) -> JSONResponse:
+        """SPEC-004 AC-01/02: every record of the workspace, or nothing."""
+        limited(export_limiter, principal)
+        if exporting.locked():
+            raise HTTPException(
+                status_code=503,
+                detail={"error": "export_busy"},
+                headers={"Retry-After": "30"},
+            )
+        async with exporting, cells.session() as http:
+
+            async def one(
+                cell: str, plural: str
+            ) -> tuple[list[dict[str, Any]], str | None]:
+                try:
+                    rows, truncated = await cells.list_all(
+                        http, cell, plural, principal.token, page_cap=export_cap
+                    )
+                except CellError as exc:
+                    return [], exc.kind
+                return (rows, "too_large") if truncated else (rows, None)
+
+            tasks = [asyncio.ensure_future(one(c, p)) for c, p in RESOURCES]
+            try:
+                await asyncio.wait(tasks, timeout=export_deadline)
+            finally:
+                late = [task for task in tasks if not task.done()]
+                for task in late:
+                    task.cancel()
+                # Let the cancelled reads finish unwinding (slots released) before answering.
+                await asyncio.gather(*late, return_exceptions=True)
+            results = [
+                task.result() if not task.cancelled() else ([], "timeout")
+                for task in tasks
+            ]
+        failed = {
+            _key(c, p): error
+            for (c, p), (_, error) in zip(RESOURCES, results, strict=True)
+            if error
+        }
+        if failed:
+            audit("finance-api.export", principal, outcome="incomplete", sources=failed)
+            return JSONResponse(
+                {"error": "export_incomplete", "sources": failed},
+                status_code=502,
+                headers={"Cache-Control": "no-store"},
+            )
+        records = {
+            _key(c, p): rows
+            for (c, p), (rows, _) in zip(RESOURCES, results, strict=True)
+        }
+        now = datetime.now(BANGKOK)
+        audit(
+            "finance-api.export",
+            principal,
+            outcome="ok",
+            records=sum(len(rows) for rows in records.values()),
+        )
+        name = f"finance-export-{principal.workspace}-{now:%Y%m%d}.json"
+        return JSONResponse(
+            {
+                "format": "finance-export/1",
+                "workspace": str(principal.workspace),
+                "generated_at": now.isoformat(),
+                "records": records,
+            },
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Disposition": f'attachment; filename="{name}"',
+            },
+        )
+
+    @app.post("/v1/erase")
+    async def erase(payload: EraseBody, principal: Caller) -> dict[str, Any]:
+        """SPEC-004 AC-03..06: erase in reference order, in bounded steps the caller repeats."""
+        try:
+            confirmed = uuid.UUID(payload.confirm) == principal.workspace
+        except ValueError:
+            confirmed = False
+        if not confirmed:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "invalid_value", "fields": ["confirm"]},
+            )
+        limited(
+            erase_limiter, principal
+        )  # after the confirmation: a mistyped one costs no slot
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + erase_budget
+        report: dict[str, dict[str, Any]] = {
+            _key(c, p): {"erased": 0, "remaining": None} for c, p in RESOURCES
+        }
+        workspace = str(principal.workspace)
+        async with cells.session() as http:
+
+            async def run(cell: str, plural: str) -> bool:
+                """True when the resource has nothing left."""
+                entry = report[_key(cell, plural)]
+                while (left := deadline - loop.time()) > 0:
+                    try:
+                        # The budget is a hard limit: a batch may not run past it.
+                        erased, remaining = await asyncio.wait_for(
+                            cells.erase(http, cell, plural, principal.token, workspace),
+                            left,
+                        )
+                    except TimeoutError:
+                        return False
+                    except CellError as exc:
+                        report[_key(cell, plural)] = {"error": exc.kind}
+                        return False
+                    entry["erased"] += erased
+                    entry["remaining"] = remaining
+                    if remaining == 0:
+                        return True
+                    if erased == 0:
+                        # Still pointed at: the references catch up after the earlier
+                        # stage's events are relayed. Wait a little, within the budget.
+                        if deadline - loop.time() <= erase_pause:
+                            return False
+                        await asyncio.sleep(erase_pause)
+                return False
+
+            done = True
+            for stage in ERASE_STAGES:
+                finished = await asyncio.gather(*(run(c, p) for c, p in stage))
+                if not all(finished):
+                    done = False
+                    break
+        audit(
+            "finance-api.erase",
+            principal,
+            outcome="done" if done else "partial",
+            erased=sum(int(v.get("erased", 0)) for v in report.values()),
+            errors={k: v["error"] for k, v in report.items() if "error" in v},
+        )
+        return {"done": done, "resources": report}
 
     return app
