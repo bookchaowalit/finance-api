@@ -437,3 +437,39 @@ def test_a_gateway_base_keeps_its_path():
     paths = {r.url.path for r in seen}
     assert "/v1/finance-accounts/v1/accounts" in paths
     assert all(r.url.host == "gw.example" for r in seen)
+
+
+def test_the_rate_limiter_is_safe_across_threads():
+    """AC-10: FastAPI runs the sync auth dependency in a threadpool, so check() must be atomic."""
+    import threading
+    import uuid as _uuid
+
+    from finance_api.app import RateLimiter
+    from finance_api.auth import Principal
+
+    limiter = RateLimiter(50)
+    me = Principal(_uuid.uuid4(), _uuid.uuid4(), None, "api", "t")
+    allowed: list[bool] = []
+    start = threading.Barrier(20)
+
+    def hit() -> None:
+        start.wait()
+        for _ in range(10):
+            allowed.append(limiter.check(me) == 0)
+            # other subjects churn the dict (pruning) at the same time
+            limiter.check(Principal(_uuid.uuid4(), _uuid.uuid4(), None, "api", "t"))
+
+    import sys
+
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)  # switch threads as often as possible to expose races
+    try:
+        threads = [threading.Thread(target=hit) for _ in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        sys.setswitchinterval(old)
+    assert sum(allowed) == 50
+    assert len(allowed) == 200  # no thread died on "dict changed size during iteration"
