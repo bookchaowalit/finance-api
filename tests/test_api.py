@@ -583,3 +583,43 @@ def test_a_slow_unrelated_cell_does_not_delay_the_transactions_read(cells):
     assert r.json()["tax"]["ok"] is True
     (at,) = tx_at
     assert at < 0.4  # read while tax was still answering
+
+
+def test_an_error_in_load_month_cancels_the_other_sources(cells, monkeypatch):
+    """SPEC-002 AC-07: on any early exit the alongside loads are cancelled, not orphaned."""
+    import asyncio as _asyncio
+
+    from finance_api import views as _views
+
+    finished: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host.split(".")[0]
+        if host == "tax":
+            await _asyncio.sleep(0.3)
+            finished.append(host)
+        return cells.handler(request)
+
+    def boom(*a, **k):
+        raise ValueError("bad plan row")
+
+    monkeypatch.setattr(_views, "transaction_window", boom)
+    app = create_app(
+        TokenVerifier(PUBLIC, ISSUER, "finance-api"),
+        CellClient(CELLS, transport=httpx.MockTransport(handler), timeout=2.0),
+    )
+
+    async def run() -> None:
+        # One long-lived loop, as under uvicorn (TestClient would cancel leftovers itself).
+        api = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://finance"
+        )
+        async with api:
+            with pytest.raises(ValueError, match="bad plan row"):
+                await api.get(
+                    "/v1/overview", params={"month": "2026-11"}, headers=auth()
+                )
+        await _asyncio.sleep(0.5)  # an orphaned tax load would finish here
+
+    _asyncio.run(run())
+    assert finished == []
