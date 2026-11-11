@@ -48,6 +48,22 @@ ignore = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"
-strict = true
-packages = ["finance_api"]
+files = ["src", "tests"]
 mypy_path = "src"
+strict_equality = true
+warn_redundant_casts = true
+warn_unused_configs = true
+warn_unused_ignores = true
+
+# Service code: mypy --strict. tests/ stays gradual (pytest injects fixtures by name).
+[[tool.mypy.overrides]]
+module = ["finance_api.*"]
+check_untyped_defs = true
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+no_implicit_reexport = true
+warn_return_any = true
