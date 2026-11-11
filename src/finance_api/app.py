@@ -76,11 +76,16 @@ def create_app(verifier: TokenVerifier, cells: CellClient) -> FastAPI:
 
     Caller = Annotated[Principal, Depends(caller)]
 
-    async def load(principal: Principal, names: list[str]) -> dict[str, Loaded]:
+    async def load(
+        principal: Principal,
+        names: list[str],
+        extra: dict[str, dict[str, str | list[str]]] | None = None,
+    ) -> dict[str, Loaded]:
         async with cells.session() as http:
 
             async def one(name: str) -> Loaded:
                 cell, plural, filters = SOURCES[name]
+                filters = {**filters, **(extra or {}).get(name, {})}
                 try:
                     rows, truncated = await cells.list_all(
                         http, cell, plural, principal.token, filters
@@ -91,6 +96,20 @@ def create_app(verifier: TokenVerifier, cells: CellClient) -> FastAPI:
 
             results = await asyncio.gather(*(one(name) for name in names))
         return dict(zip(names, results, strict=True))
+
+    async def load_month(
+        principal: Principal, names: list[str], plans: list[str], month: str
+    ) -> dict[str, Loaded]:
+        """``names`` first, then only the transactions the month's plans need (SPEC-002)."""
+        d = await load(principal, names)
+        start, end = views.transaction_window((d[p].rows for p in plans), month)
+        bounds: dict[str, str | list[str]] = {}
+        if start is not None:
+            bounds["transaction_date_from"] = start.isoformat()
+        if end is not None:
+            bounds["transaction_date_to"] = end.isoformat()
+        d.update(await load(principal, ["transactions"], {"transactions": bounds}))
+        return d
 
     def section(
         needs: list[Loaded], build: Callable[[], dict[str, Any]]
@@ -114,11 +133,10 @@ def create_app(verifier: TokenVerifier, cells: CellClient) -> FastAPI:
     ) -> dict[str, Any]:
         m = _month(month)
         today = datetime.now(BANGKOK).date()
-        d = await load(
+        d = await load_month(
             principal,
             [
                 "accounts",
-                "transactions",
                 "budgets",
                 "cash_flow",
                 "subscriptions",
@@ -126,6 +144,8 @@ def create_app(verifier: TokenVerifier, cells: CellClient) -> FastAPI:
                 "investments",
                 "tax",
             ],
+            ["budgets", "cash_flow"],
+            m,
         )
         tx = d["transactions"]
         return {
@@ -178,7 +198,7 @@ def create_app(verifier: TokenVerifier, cells: CellClient) -> FastAPI:
         principal: Caller, month: Annotated[str | None, Query()] = None
     ) -> dict[str, Any]:
         m = _month(month)
-        d = await load(principal, ["budgets", "transactions"])
+        d = await load_month(principal, ["budgets"], ["budgets"], m)
         return {
             "month": m,
             "budgets": section(

@@ -82,6 +82,27 @@ def _covers(row: Row, start: date, end: date) -> bool:
     return (first is None or first <= end) and (last is None or last >= start)
 
 
+def transaction_window(
+    plan_sets: Iterable[Sequence[Row]], month: str
+) -> tuple[date | None, date | None]:
+    """The days of transactions a month view needs (SPEC-002): the month, widened to every active plan
+    that overlaps it; None on a side that some such plan leaves open."""
+    start: date | None
+    end: date | None
+    start, end = month_bounds(month)
+    first, last = start, end
+    for plans in plan_sets:
+        for p in plans:
+            if p.get("status", "active") != "active" or not _covers(p, first, last):
+                continue
+            p_start, p_end = _day(p.get("period_start")), _day(p.get("period_end"))
+            if start is not None:
+                start = None if p_start is None else min(start, p_start)
+            if end is not None:
+                end = None if p_end is None else max(end, p_end)
+    return start, end
+
+
 def _flows(
     rows: Iterable[Row],
     start: date | None,

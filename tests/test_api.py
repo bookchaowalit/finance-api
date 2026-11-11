@@ -282,3 +282,82 @@ def test_net_worth_and_budget_vs_actual(client, cells):
 def test_the_cell_client_refuses_plain_http():
     with pytest.raises(ValueError, match="https"):
         CellClient({"budgets": "http://budgets.example"})
+
+
+# --- SPEC-002: bounded transaction reads -----------------------------------------------------------
+
+
+def _tx_params(cells):
+    return [
+        dict(r.url.params) for r in cells.seen if r.url.host.startswith("transactions.")
+    ]
+
+
+def test_overview_reads_only_the_month(client, cells):  # SPEC-002 AC-01, AC-05
+    cells.rows[("transactions", "transactions")] = [
+        {
+            "id": 1,
+            "transaction_date": "2026-11-02",
+            "transaction_type": "income",
+            "amount": "10.0000",
+            "currency": "THB",
+        }
+    ]
+    body = client.get(
+        "/v1/overview", params={"month": "2026-11"}, headers=auth()
+    ).json()
+    assert body["transactions"]["income"] == {"THB": "10.0000"}
+    (sent,) = _tx_params(cells)
+    assert sent["transaction_date_from"] == "2026-11-01"
+    assert sent["transaction_date_to"] == "2026-11-30"
+
+
+def test_budget_window_follows_the_plans(client, cells):  # SPEC-002 AC-02, AC-03, AC-05
+    cells.rows[("budgets", "budget-plans")] = [
+        {
+            "id": 1,
+            "name": "Quarter",
+            "category": "food",
+            "period_start": "2026-10-01",
+            "period_end": None,
+            "planned_amount": "10.0000",
+            "currency": "THB",
+            "status": "active",
+        }
+    ]
+    cells.rows[("transactions", "transactions")] = [
+        {
+            "id": 1,
+            "transaction_date": "2026-10-05",
+            "transaction_type": "expense",
+            "amount": "4.0000",
+            "currency": "THB",
+            "category": "food",
+        }
+    ]
+    bva = client.get(
+        "/v1/budget-vs-actual", params={"month": "2026-11"}, headers=auth()
+    ).json()
+    assert bva["budgets"]["lines"][0]["spent"] == "4.0000"
+    (sent,) = _tx_params(cells)
+    assert sent["transaction_date_from"] == "2026-10-01"
+    assert "transaction_date_to" not in sent
+
+
+def test_unreadable_plans_keep_the_month_window(client, cells):  # SPEC-002 AC-04
+    cells.fail["budgets"] = 503
+    body = client.get(
+        "/v1/budget-vs-actual", params={"month": "2026-11"}, headers=auth()
+    ).json()
+    assert body["budgets"]["ok"] is False
+    (sent,) = _tx_params(cells)
+    assert (sent["transaction_date_from"], sent["transaction_date_to"]) == (
+        "2026-11-01",
+        "2026-11-30",
+    )
+
+
+def test_net_worth_reads_every_transaction(client, cells):  # SPEC-002 AC-06
+    client.get("/v1/net-worth", headers=auth())
+    (sent,) = _tx_params(cells)
+    assert not {"transaction_date_from", "transaction_date_to"} & set(sent)

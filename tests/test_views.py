@@ -204,3 +204,47 @@ def test_net_worth_per_currency():
     assert out["accounts"] == {"THB": "135.0000", "USD": "-1.0000"}
     assert out["net_worth"] == {"THB": "485.0000", "USD": "-1.0000"}
     assert out["not_counted"] == {"transfer": 1}
+
+
+# --- SPEC-002: the transactions window ---------------------------------------------------------
+
+
+def plan(start, end, status="active"):
+    return {"period_start": start, "period_end": end, "status": status}
+
+
+def test_window_is_the_month_when_no_plan_reaches_outside():  # SPEC-002 AC-01
+    inside = [plan("2026-11-01", "2026-11-30"), plan("2026-11-10", "2026-11-20")]
+    assert views.transaction_window([inside], "2026-11") == (
+        date(2026, 11, 1),
+        date(2026, 11, 30),
+    )
+    assert views.transaction_window([], "2026-11") == (
+        date(2026, 11, 1),
+        date(2026, 11, 30),
+    )
+
+
+def test_window_widens_to_overlapping_plans():  # SPEC-002 AC-02
+    budgets = [plan("2026-10-15", "2026-11-15")]
+    cash = [plan("2026-11-20", "2027-01-31")]
+    # A plan that does not overlap the month, or is not active, does not widen it.
+    other = [
+        plan("2025-01-01", "2025-12-31"),
+        plan("2020-01-01", "2030-01-01", "archived"),
+    ]
+    assert views.transaction_window([budgets, cash, other], "2026-11") == (
+        date(2026, 10, 15),
+        date(2027, 1, 31),
+    )
+
+
+def test_an_open_ended_plan_leaves_that_side_open():  # SPEC-002 AC-03
+    assert views.transaction_window([[plan(None, "2026-11-30")]], "2026-11") == (
+        None,
+        date(2026, 11, 30),
+    )
+    assert views.transaction_window([[plan("2026-11-01", "")]], "2026-11") == (
+        date(2026, 11, 1),
+        None,
+    )
