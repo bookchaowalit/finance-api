@@ -158,19 +158,21 @@ def create_app(
         rest = asyncio.ensure_future(load(principal, others))
         try:
             d = await load(principal, plans)
-        except BaseException:
-            rest.cancel()
-            raise
-        start, end = views.transaction_window((d[p].rows for p in plans), month)
-        bounds: dict[str, str | list[str]] = {}
-        if start is not None:
-            bounds["transaction_date_from"] = start.isoformat()
-        if end is not None:
-            bounds["transaction_date_to"] = end.isoformat()
-        tx = load(principal, ["transactions"], {"transactions": bounds})
-        for part in await asyncio.gather(tx, rest):
-            d.update(part)
-        return d
+            start, end = views.transaction_window((d[p].rows for p in plans), month)
+            bounds: dict[str, str | list[str]] = {}
+            if start is not None:
+                bounds["transaction_date_from"] = start.isoformat()
+            if end is not None:
+                bounds["transaction_date_to"] = end.isoformat()
+            tx = load(principal, ["transactions"], {"transactions": bounds})
+            for part in await asyncio.gather(tx, rest):
+                d.update(part)
+            return d
+        finally:
+            if (
+                not rest.done()
+            ):  # any early exit: never leave cell calls running unowned
+                rest.cancel()
 
     def section(
         needs: list[Loaded], build: Callable[[], dict[str, Any]]
