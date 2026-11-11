@@ -242,7 +242,7 @@ def create_app(
 
     def spender(principal: Principal) -> None:
         """Spending the workspace's credits takes the person's own token: no delegated (agent) token."""
-        if principal.delegation is not None:
+        if principal.delegated or principal.delegation is not None:
             raise HTTPException(
                 status_code=403, detail={"error": "delegated_token_refused"}
             )

@@ -33,6 +33,8 @@ class Principal:
     delegation: uuid.UUID | None
     channel: str
     token: str  # forwarded to the platform; never logged
+    # Any of del/obo/act: someone (an agent) acts for the actor (SPEC-005: such tokens never spend).
+    delegated: bool = False
 
     def __repr__(self) -> str:  # keep the token out of logs and tracebacks
         return f"Principal(actor={self.actor}, workspace={self.workspace}, channel={self.channel})"
@@ -189,6 +191,7 @@ class TokenVerifier:
             actor = uuid.UUID(claims["sub"])
             workspace = uuid.UUID(claims["ws"])
             delegation = uuid.UUID(claims["del"]) if claims.get("del") else None
+            delegated = any(claims.get(name) for name in IDENTITY_FORBIDDEN_CLAIMS)
         except Unauthenticated:
             raise
         except (jwt.PyJWTError, KeyError, ValueError, TypeError) as exc:
@@ -202,4 +205,5 @@ class TokenVerifier:
             delegation=delegation,
             channel=channel,
             token=token,
+            delegated=delegated,
         )

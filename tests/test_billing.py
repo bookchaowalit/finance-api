@@ -533,9 +533,17 @@ def test_pass_arithmetic_orders_by_instant_and_refuses_bad_rows():
             pass_state(bad)
 
 
-def test_delegated_tokens_cannot_spend(fake):
+@pytest.mark.parametrize(
+    "claim",
+    [
+        {"del": str(uuid.uuid4())},
+        {"obo": str(uuid.uuid4())},
+        {"act": {"sub": "agent"}},
+    ],
+)
+def test_delegated_tokens_cannot_spend(fake, claim):
     client, _ = make(fake)
-    t = token(**{"del": str(uuid.uuid4())})
+    t = token(**claim)
     ws = jwt.decode(t, options={"verify_signature": False})["ws"]
     fund(fake, ws, 100_000)
     headers = {"Authorization": f"Bearer {t}"}
