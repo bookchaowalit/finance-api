@@ -473,3 +473,33 @@ def test_the_rate_limiter_is_safe_across_threads():
         sys.setswitchinterval(old)
     assert sum(allowed) == 50
     assert len(allowed) == 200  # no thread died on "dict changed size during iteration"
+
+
+def test_waiting_for_an_upstream_slot_counts_against_the_timeout():
+    """AC-04/AC-10: a request that cannot get an inflight slot within the timeout is a
+    `timeout` for that cell, not an unbounded wait."""
+    import asyncio as _asyncio
+
+    from finance_api.cells import CellError
+
+    client = CellClient(
+        CELLS,
+        transport=httpx.MockTransport(
+            lambda r: httpx.Response(200, json={"items": []})
+        ),
+        timeout=0.05,
+        max_inflight=1,
+    )
+
+    async def run() -> str:
+        await client._inflight.acquire()  # every slot busy (a slow cell)
+        try:
+            async with client.session() as http:
+                await client.list_all(http, "tax", "tax-items", "t")
+        except CellError as exc:
+            return exc.kind
+        finally:
+            client._inflight.release()
+        return "no error"
+
+    assert _asyncio.run(_asyncio.wait_for(run(), 2)) == "timeout"
