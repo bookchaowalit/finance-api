@@ -118,7 +118,14 @@ def run() -> None:
     configure_logging()
     # platform-api-gateway SPEC-002: off until the gateway owner sets GATEWAY_ASSERTION_MODE/KEY.
     check = gateway.GatewayCheck.from_env(gateway.SYSTEM)
-    app = create_app(verifier(), cells(), rate_per_minute=rate_per_minute())
+    from finance_api.billing import billing_from_env
+
+    app = create_app(
+        verifier(),
+        cells(),
+        rate_per_minute=rate_per_minute(),
+        billing=billing_from_env(),
+    )
     gateway.install(app, check)
     uvicorn.run(
         app,

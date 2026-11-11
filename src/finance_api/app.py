@@ -9,19 +9,21 @@ import json
 import logging
 import math
 import os
+import re
 import threading
 import time
 import uuid
 from collections import deque
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
+from finance_api import billing as billing_mod
 from finance_api import views
 from finance_api.auth import Principal, TokenVerifier, Unauthenticated
 from finance_api.cells import CellClient, CellError
@@ -76,6 +78,16 @@ EXPORT_DEADLINE = 70.0  # seconds; Cloudflare gives up at 100
 class EraseBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     confirm: str
+
+
+class PassBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    months: int = Field(ge=1, le=12, strict=True)
+
+
+class TopupBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    amount: int = Field(ge=1_000, le=10_000_000, strict=True)
 
 
 def _key(cell: str, plural: str) -> str:
@@ -168,7 +180,10 @@ def create_app(
     erase_budget: float = 60.0,
     erase_pause: float = 3.0,
     export_deadline: float = EXPORT_DEADLINE,
+    billing: billing_mod.Billing | None = None,
 ) -> FastAPI:
+    if billing is not None and billing.mode == "off":
+        billing = None  # SPEC-005 AC-01: off means no credits call at all
     limiter = RateLimiter(rate_per_minute)
     # SPEC-004 AC-07: export and erase read or change everything; each has its own window.
     export_limiter = RateLimiter(3, window=600.0)
@@ -200,6 +215,37 @@ def create_app(
         return principal
 
     Caller = Annotated[Principal, Depends(caller)]
+
+    async def paid(principal: Caller) -> Principal:
+        """SPEC-005 AC-04/05: the views need a current pass in enforce mode (fail open on outage)."""
+        if billing is None:
+            return principal
+        try:
+            state = await billing.state(principal.workspace)
+        except billing_mod.Unavailable as exc:
+            audit("finance-api.pass_unknown", principal, reason=str(exc))
+            return principal
+        if not state.active(datetime.now(UTC)):
+            if billing.mode == "enforce":
+                raise HTTPException(status_code=402, detail={"error": "pass_required"})
+            audit("finance-api.pass_missing", principal)
+        return principal
+
+    Paid = Annotated[Principal, Depends(paid)]
+
+    def unavailable() -> HTTPException:
+        return HTTPException(
+            status_code=503,
+            detail={"error": "billing_unavailable"},
+            headers={"Retry-After": "30"},
+        )
+
+    def idempotency(key: str | None) -> str:
+        if key is None or not re.fullmatch(r"[A-Za-z0-9_.:-]{8,100}", key):
+            raise HTTPException(
+                status_code=400, detail={"error": "idempotency_key_required"}
+            )
+        return key
 
     def limited(window: RateLimiter, principal: Principal) -> None:
         wait = window.check(principal)
@@ -292,7 +338,7 @@ def create_app(
 
     @app.get("/v1/overview")
     async def overview(
-        principal: Caller, month: Annotated[str | None, Query()] = None
+        principal: Paid, month: Annotated[str | None, Query()] = None
     ) -> dict[str, Any]:
         m = _month(month)
         today = datetime.now(BANGKOK).date()
@@ -358,7 +404,7 @@ def create_app(
 
     @app.get("/v1/budget-vs-actual")
     async def budget_vs_actual(
-        principal: Caller, month: Annotated[str | None, Query()] = None
+        principal: Paid, month: Annotated[str | None, Query()] = None
     ) -> dict[str, Any]:
         m = _month(month)
         d = await load_month(principal, ["budgets"], ["budgets"], m)
@@ -373,7 +419,7 @@ def create_app(
         }
 
     @app.get("/v1/net-worth")
-    async def net_worth(principal: Caller) -> dict[str, Any]:
+    async def net_worth(principal: Paid) -> dict[str, Any]:
         names = ["accounts", "transactions", "investments", "assets", "liabilities"]
         d = await load(principal, names)
         for name in names:
@@ -528,5 +574,89 @@ def create_app(
             errors={k: v["error"] for k, v in report.items() if "error" in v},
         )
         return {"done": done, "resources": report}
+
+    @app.get("/v1/billing")
+    async def billing_state(principal: Caller) -> dict[str, Any]:
+        """SPEC-005 AC-01."""
+        if billing is None:
+            return {"mode": "off"}
+        try:
+            state = await billing.credits.pass_state(principal.workspace)
+            account = await billing.credits.account(principal.workspace)
+            price = await billing.credits.price()
+        except billing_mod.Unavailable as exc:
+            raise unavailable() from exc
+        billing.remember(principal.workspace, state)
+        return {
+            "mode": billing.mode,
+            "pass": state.public(datetime.now(UTC)),
+            "balance": {
+                "available": account.get("available"),
+                "currency": account.get("currency"),
+            },
+            "price": price,
+        }
+
+    if billing is not None:
+        credits = billing.credits
+
+        @app.post("/v1/billing/pass")
+        async def buy_pass(
+            payload: PassBody,
+            principal: Caller,
+            idempotency_key: Annotated[str | None, Header()] = None,
+        ) -> dict[str, Any]:
+            """SPEC-005 AC-03."""
+            key = idempotency(idempotency_key)
+            try:
+                state, charged = await credits.buy(
+                    principal.workspace, principal.actor, payload.months, key
+                )
+            except billing_mod.Insufficient as exc:
+                raise HTTPException(
+                    status_code=402,
+                    detail={
+                        "error": "insufficient_credits",
+                        "available": exc.available,
+                        "required": exc.required,
+                    },
+                ) from exc
+            except billing_mod.NotForSale as exc:
+                raise HTTPException(
+                    status_code=409, detail={"error": "pass_not_for_sale"}
+                ) from exc
+            except billing_mod.KeyUsed as exc:
+                raise HTTPException(
+                    status_code=409, detail={"error": "idempotency_key_used"}
+                ) from exc
+            except billing_mod.Unavailable as exc:
+                raise unavailable() from exc
+            billing.remember(principal.workspace, state)
+            audit(
+                "finance-api.pass_bought" if charged else "finance-api.pass_replayed",
+                principal,
+                months=payload.months,
+            )
+            return {"pass": state.public(datetime.now(UTC))}
+
+        @app.post("/v1/billing/topups")
+        async def topup(
+            payload: TopupBody,
+            principal: Caller,
+            idempotency_key: Annotated[str | None, Header()] = None,
+        ) -> JSONResponse:
+            """SPEC-005 AC-02: the checkout URL goes to the caller only, never to a log."""
+            key = idempotency(idempotency_key)
+            try:
+                order = await credits.topup(principal.workspace, payload.amount, key)
+            except billing_mod.Unavailable as exc:
+                raise unavailable() from exc
+            audit("finance-api.topup", principal, amount=payload.amount)
+            status = order.pop("status_code")
+            return JSONResponse(
+                order,
+                status_code=201 if status == 201 else 200,
+                headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+            )
 
     return app
