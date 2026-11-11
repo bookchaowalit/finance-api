@@ -181,6 +181,7 @@ def create_app(
     erase_pause: float = 3.0,
     export_deadline: float = EXPORT_DEADLINE,
     billing: billing_mod.Billing | None = None,
+    entitlement_subject: uuid.UUID | None = None,
 ) -> FastAPI:
     if billing is not None and billing.mode == "off":
         billing = None  # SPEC-005 AC-01: off means no credits call at all
@@ -205,6 +206,9 @@ def create_app(
             raise HTTPException(
                 status_code=401, detail={"error": "unauthenticated"}
             ) from exc
+        if entitlement_subject is not None and principal.actor == entitlement_subject:
+            # SPEC-006 AC-04: identity's entitlement token answers one question only.
+            raise HTTPException(status_code=403, detail={"error": "service_only"})
         wait = limiter.check(principal)
         if wait:
             raise HTTPException(
@@ -667,5 +671,36 @@ def create_app(
                 status_code=201 if status == 201 else 200,
                 headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
             )
+
+    if entitlement_subject is not None:
+
+        @app.get("/v1/internal/entitlement")
+        async def entitlement(
+            authorization: Annotated[str | None, Header()] = None,
+        ) -> dict[str, Any]:
+            """SPEC-006: does the token's workspace have a current pass (asked by identity)."""
+            try:
+                principal = verifier.verify(authorization, None)
+            except Unauthenticated as exc:
+                raise HTTPException(
+                    status_code=401, detail={"error": "unauthenticated"}
+                ) from exc
+            if (
+                not principal.from_identity
+                or principal.actor != entitlement_subject
+                or principal.delegated
+                or "finance-api.entitlement:read" not in (principal.scopes or ())
+            ):
+                raise HTTPException(status_code=403, detail={"error": "forbidden"})
+            if billing is None:
+                return {"active": True, "expires_at": None, "mode": "off"}
+            try:
+                state = await billing.state(principal.workspace)
+            except billing_mod.Unavailable as exc:
+                raise HTTPException(
+                    status_code=503, detail={"error": "billing_unavailable"}
+                ) from exc
+            public = state.public(datetime.now(UTC))
+            return {**public, "mode": billing.mode}
 
     return app

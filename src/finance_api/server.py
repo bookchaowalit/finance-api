@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import urllib.parse
+import uuid
 
 from finance_api.auth import JwksKeys, TokenVerifier, TrustedIssuer
 from finance_api.cells import DEFAULT_CELLS, CellClient
@@ -85,6 +86,19 @@ def edge_bypass(env: dict[str, str] | os._Environ[str] = os.environ) -> str | No
     return value
 
 
+def entitlement_subject(
+    env: dict[str, str] | os._Environ[str] = os.environ,
+) -> uuid.UUID | None:
+    """SPEC-006: identity's entitlement subject; unset = no /v1/internal/entitlement."""
+    raw = env.get(f"{PREFIX}_ENTITLEMENT_SUBJECT", "").strip()
+    if not raw:
+        return None
+    try:
+        return uuid.UUID(raw)
+    except ValueError:
+        raise SystemExit(f"{PREFIX}_ENTITLEMENT_SUBJECT must be a UUID") from None
+
+
 def rate_per_minute(env: dict[str, str] | os._Environ[str] = os.environ) -> int:
     """Requests per subject per minute; each one fans out to up to 8 cells (SPEC-001 AC-10)."""
     value = int(env.get(f"{PREFIX}_RATE_PER_MINUTE", "12"))
@@ -125,6 +139,7 @@ def run() -> None:
         cells(),
         rate_per_minute=rate_per_minute(),
         billing=billing_from_env(),
+        entitlement_subject=entitlement_subject(),
     )
     gateway.install(app, check)
     uvicorn.run(

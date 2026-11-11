@@ -35,6 +35,9 @@ class Principal:
     token: str  # forwarded to the platform; never logged
     # Any of del/obo/act: someone (an agent) acts for the actor (SPEC-005: such tokens never spend).
     delegated: bool = False
+    # SPEC-006: the token's scope claim (None when absent) and whether platform-identity issued it.
+    scopes: frozenset[str] | None = None
+    from_identity: bool = False
 
     def __repr__(self) -> str:  # keep the token out of logs and tracebacks
         return f"Principal(actor={self.actor}, workspace={self.workspace}, channel={self.channel})"
@@ -192,6 +195,8 @@ class TokenVerifier:
             workspace = uuid.UUID(claims["ws"])
             delegation = uuid.UUID(claims["del"]) if claims.get("del") else None
             delegated = any(claims.get(name) for name in IDENTITY_FORBIDDEN_CLAIMS)
+            raw_scope = claims.get("scope")
+            scopes = frozenset(str(raw_scope).split()) if raw_scope else None
         except Unauthenticated:
             raise
         except (jwt.PyJWTError, KeyError, ValueError, TypeError) as exc:
@@ -206,4 +211,6 @@ class TokenVerifier:
             channel=channel,
             token=token,
             delegated=delegated,
+            scopes=scopes,
+            from_identity=from_identity,
         )
