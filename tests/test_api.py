@@ -528,3 +528,30 @@ def test_slot_wait_and_cell_call_share_one_deadline():
     _asyncio.run(run())
     (left,) = sent
     assert 0 < left <= 0.75
+
+
+def test_the_deadline_covers_the_whole_cell_call():
+    """AC-04: httpx timeouts are per read; the whole call must end by the deadline."""
+    import asyncio as _asyncio
+    import time as _time
+
+    from finance_api.cells import CellError
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        await _asyncio.sleep(1.0)  # e.g. a body trickling in under each read timeout
+        return httpx.Response(200, json={"items": []})
+
+    client = CellClient(CELLS, transport=httpx.MockTransport(slow), timeout=0.1)
+
+    async def run() -> str:
+        async with client.session() as http:
+            try:
+                await client.list_all(http, "tax", "tax-items", "t")
+            except CellError as exc:
+                return exc.kind
+        return "no error"
+
+    t0 = _time.monotonic()
+    assert _asyncio.run(run()) == "timeout"
+    assert _time.monotonic() - t0 < 0.5
+    assert client._inflight._value == client.max_inflight  # slot given back

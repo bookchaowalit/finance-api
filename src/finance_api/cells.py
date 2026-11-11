@@ -111,13 +111,18 @@ class CellClient:
                 left = deadline - loop.time()
                 if left <= 0:
                     raise CellError("timeout")
-                response = await http.get(
-                    f"{self.urls[cell]}/v1/{plural}",
-                    params=params,
-                    headers={"Authorization": f"Bearer {bearer}"},
-                    timeout=left,
+                # httpx's timeout is per connect/read/write; wait_for bounds the whole call,
+                # so a trickling body can't run past the deadline.
+                response = await asyncio.wait_for(
+                    http.get(
+                        f"{self.urls[cell]}/v1/{plural}",
+                        params=params,
+                        headers={"Authorization": f"Bearer {bearer}"},
+                        timeout=left,
+                    ),
+                    left,
                 )
-            except httpx.TimeoutException as exc:
+            except (httpx.TimeoutException, TimeoutError) as exc:
                 raise CellError("timeout") from exc
             except httpx.HTTPError as exc:
                 raise CellError("unreachable") from exc
