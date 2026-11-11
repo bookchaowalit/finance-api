@@ -29,6 +29,7 @@ one cold or failing cell blanks only its own sections. Writes go straight to the
 | `FINANCE_API_JWT_IDENTITY_ISSUER` + `FINANCE_API_JWT_IDENTITY_JWKS_URL` | optional second issuer (platform-identity), both or neither |
 | `FINANCE_API_CELLS` | optional JSON `{"<cell>": "https://..."}` overriding the production URLs |
 | `FINANCE_API_TIMEOUT_SECONDS` | per cell request, default 20 (cells may cold-start) |
+| `GATEWAY_ASSERTION_MODE`, `GATEWAY_ASSERTION_KEY` | the edge gateway assertion check (`off`/`report`/`enforce`); set by the gateway owner only |
 | `SENTRY_DSN` | optional; events are scrubbed |
 
 ## Develop

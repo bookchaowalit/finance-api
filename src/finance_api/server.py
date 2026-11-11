@@ -94,11 +94,15 @@ def rate_per_minute(env: dict[str, str] | os._Environ[str] = os.environ) -> int:
 def run() -> None:
     import uvicorn
 
+    from finance_api import gateway
     from finance_api._sentry import init_sentry
     from finance_api.app import create_app
 
     init_sentry()
+    # platform-api-gateway SPEC-002: off until the gateway owner sets GATEWAY_ASSERTION_MODE/KEY.
+    check = gateway.GatewayCheck.from_env(gateway.SYSTEM)
     app = create_app(verifier(), cells(), rate_per_minute=rate_per_minute())
+    gateway.install(app, check)
     uvicorn.run(
         app,
         host=os.environ.get("HOST", "0.0.0.0"),

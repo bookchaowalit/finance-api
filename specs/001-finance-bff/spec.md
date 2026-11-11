@@ -6,7 +6,7 @@ Standard: ADR-0004 — TDD + SDD. Phase 4 of the finance SaaS plan (2026-11-11).
 
 | Field | Value |
 |---|---|
-| Spec ID / version | SPEC-001 / 1.0 |
+| Spec ID / version | SPEC-001 / 1.1 |
 | Status | approved (2026-11-11, see Approval) |
 | Repository / path | bookchaowalit/finance-api / `specs/001-finance-bff/spec.md` |
 | Owner (maker) | Claude Code (implementer session, 2026-11-11) |
@@ -82,6 +82,7 @@ Standard: ADR-0004 — TDD + SDD. Phase 4 of the finance SaaS plan (2026-11-11).
 | Version | Date | Change | Approved by |
 |---|---|---|---|
 | 1.0 | 2026-11-11 | first version | owner, chat 2026-11-11 |
+| 1.1 | 2026-11-11 | Phase 5: finance-api checks the edge gateway assertion on its own routes (`gateway.py`, byte-identical copy of platform-notifications-api except `SYSTEM = "finance-api"` and the logger; `GATEWAY_ASSERTION_MODE`/`_KEY` set by the gateway owner, off until then). Tests copied with the module (no separate red run); green: 75 passed, coverage 96%. | owner, chat 2026-11-11 ("เริ่มระยะ 5") |
 
 ## Approval
 
