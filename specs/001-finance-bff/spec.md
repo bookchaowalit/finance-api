@@ -44,12 +44,14 @@ Standard: ADR-0004 — TDD + SDD. Phase 4 of the finance SaaS plan (2026-11-11).
 | AC-06 | **Given** more rows than one page, **then** finance-api pages with `after_id` up to a cap (default 10 000 rows per resource) and marks the section `truncated: true` past it. |
 | AC-07 | **Given** `/v1/net-worth`, **then** per currency: accounts (opening balance + income/refund − expense/fee of their transactions), investments (current value), business assets (total value) minus liabilities (outstanding); transfers and adjustments are listed as not counted. |
 | AC-08 | **Given** `month` that is not `YYYY-MM`, **then** 422. |
+| AC-09 | **Given** no `FINANCE_API_CELLS`, **then** every cell is called through the edge gateway `https://gateway.bookchaowalit.com/v1/<cell>` (Cloudflare WAF, rate limit and the signed `X-Gateway-Assertion`), never a cell's public `*.up.railway.app` origin, so the cells can run `GATEWAY_ASSERTION_MODE=enforce`. A base URL keeps its path. |
+| AC-10 | **Given** one subject (actor + workspace) over `FINANCE_API_RATE_PER_MINUTE` (default 12) requests in a sliding minute, **then** 429 `{"error": "rate_limited"}` with `Retry-After`, and no cell is called; other subjects and `/health` are unaffected. At most `FINANCE_API_MAX_INFLIGHT` (default 16) cell requests run at once per process. |
 
 ## 4. Interfaces and data
 
 | Interface | Contract |
 |---|---|
-| Env | `FINANCE_API_JWT_ISSUER` + `FINANCE_API_JWT_PUBLIC_KEY_PEM` or `_JWT_JWKS_URL`; optional `FINANCE_API_JWT_IDENTITY_ISSUER` + `_JWT_IDENTITY_JWKS_URL`; optional `FINANCE_API_CELLS` (JSON name → https base URL; defaults are the production URLs); `FINANCE_API_TIMEOUT_SECONDS` (default 20, cells may cold-start) |
+| Env | `FINANCE_API_JWT_ISSUER` + `FINANCE_API_JWT_PUBLIC_KEY_PEM` or `_JWT_JWKS_URL`; optional `FINANCE_API_JWT_IDENTITY_ISSUER` + `_JWT_IDENTITY_JWKS_URL`; optional `FINANCE_API_CELLS` (JSON name → https base URL; defaults are the production URLs); `FINANCE_API_TIMEOUT_SECONDS` (default 20, cells may cold-start); `FINANCE_API_RATE_PER_MINUTE` (default 12); `FINANCE_API_MAX_INFLIGHT` (default 16) |
 | Cells | `GET /v1/<plural>` with filters and `after_id` paging, as the cellkit list API |
 
 ## 5. Non-functional requirements
@@ -65,6 +67,7 @@ Standard: ADR-0004 — TDD + SDD. Phase 4 of the finance SaaS plan (2026-11-11).
 - Red first: tests in `tests/` fail before `src/` exists.
 - Levels: unit (views from fixed rows), integration (FastAPI app with an `httpx.MockTransport` standing in for the cells).
 - Red/green log (2026-11-11): red `.venv/bin/pytest -q` with the tests and no `src/`: 2 collection errors (modules missing); green `.venv/bin/pytest -q --cov`: 39 passed, total coverage 94.93% (CI gate 92); `mypy --strict` and `ruff` clean.
+- Red/green log AC-09/AC-10 (2026-11-11, security review P2): red `uv run pytest -q`: 4 failed, 39 passed (gateway defaults, rate limit, inflight bound, env); green: 43 passed, coverage 95%; `mypy --strict src` and `ruff` clean. Parity before the switch: finance-accounts and transactions returned the same status and ids direct and through the gateway.
 
 ## 7. Risks
 

@@ -71,6 +71,9 @@ def test_the_identity_issuer_comes_in_pairs_over_https():
 
 def test_cell_urls_default_to_production_and_can_be_overridden():
     assert server.cells({}).urls == DEFAULT_CELLS
+    # AC-09: the defaults go through the edge gateway, never a cell's public origin.
+    for name, url in DEFAULT_CELLS.items():
+        assert url == f"https://gateway.bookchaowalit.com/v1/{name}"
     custom = server.cells(
         {
             "FINANCE_API_CELLS": '{"tax": "https://tax.example"}',
@@ -81,3 +84,11 @@ def test_cell_urls_default_to_production_and_can_be_overridden():
     assert custom.timeout == 5.0
     with pytest.raises(SystemExit):
         server.cells({"FINANCE_API_CELLS": '{"tax": "http://tax.example"}'})
+
+
+def test_rate_and_inflight_come_from_the_environment():
+    assert server.rate_per_minute({}) == 12
+    assert server.rate_per_minute({"FINANCE_API_RATE_PER_MINUTE": "30"}) == 30
+    assert server.cells({"FINANCE_API_MAX_INFLIGHT": "4"}).max_inflight == 4
+    with pytest.raises(SystemExit):
+        server.rate_per_minute({"FINANCE_API_RATE_PER_MINUTE": "0"})

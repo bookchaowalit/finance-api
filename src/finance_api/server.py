@@ -61,10 +61,19 @@ def cells(env: dict[str, str] | os._Environ[str] = os.environ) -> CellClient:
     raw = env.get(f"{PREFIX}_CELLS", "").strip()
     urls = {**DEFAULT_CELLS, **(json.loads(raw) if raw else {})}
     timeout = float(env.get(f"{PREFIX}_TIMEOUT_SECONDS", "20"))
+    inflight = int(env.get(f"{PREFIX}_MAX_INFLIGHT", "16"))
     try:
-        return CellClient(urls, timeout=timeout)
+        return CellClient(urls, timeout=timeout, max_inflight=inflight)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+
+
+def rate_per_minute(env: dict[str, str] | os._Environ[str] = os.environ) -> int:
+    """Requests per subject per minute; each one fans out to up to 8 cells (SPEC-001 AC-10)."""
+    value = int(env.get(f"{PREFIX}_RATE_PER_MINUTE", "12"))
+    if value < 1:
+        raise SystemExit(f"{PREFIX}_RATE_PER_MINUTE must be at least 1")
+    return value
 
 
 def run() -> None:
@@ -74,7 +83,7 @@ def run() -> None:
     from finance_api.app import create_app
 
     init_sentry()
-    app = create_app(verifier(), cells())
+    app = create_app(verifier(), cells(), rate_per_minute=rate_per_minute())
     uvicorn.run(
         app,
         host=os.environ.get("HOST", "0.0.0.0"),
