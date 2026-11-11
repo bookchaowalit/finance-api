@@ -38,6 +38,7 @@ Standard: ADR-0004 — TDD + SDD. Uses the cells' SPEC-007 date-range filters (l
 | AC-04 | **Given** the plans cannot be read, **then** the transactions window is just M (the plan sections already report the error). |
 | AC-05 | **Given** any view, **then** its numbers equal those computed from all transactions (the views still filter by date themselves). |
 | AC-06 | **Given** `/v1/net-worth`, **then** transactions are read with no date bounds. |
+| AC-07 | **Given** a month view, **then** only the plan sources (budgets, cash flow) are awaited before transactions are read; the other sources load alongside, so a slow unrelated cell costs at most one cell timeout. |
 
 ## 4. Interfaces and data
 
@@ -50,6 +51,8 @@ Standard: ADR-0004 — TDD + SDD. Uses the cells' SPEC-007 date-range filters (l
 ## 5. Tests (red → green)
 
 `tests/test_views.py` (window: AC-01–AC-03) and `tests/test_api.py` (the parameters sent: AC-01, AC-04, AC-06; totals unchanged: AC-05).
+
+AC-07 (2026-11-11, Codex review P2): red `uv run pytest -k slow_unrelated` failed (transactions read only after the 0.6 s tax cell); green: read while tax was still answering; full suite 55 passed, coverage 94%.
 
 ## 6. Rollout and rollback
 

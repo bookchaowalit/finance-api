@@ -152,15 +152,24 @@ def create_app(
     async def load_month(
         principal: Principal, names: list[str], plans: list[str], month: str
     ) -> dict[str, Loaded]:
-        """``names`` first, then only the transactions the month's plans need (SPEC-002)."""
-        d = await load(principal, names)
+        """The plans first, then only the transactions they need (SPEC-002); the other
+        ``names`` load alongside, so a slow unrelated cell doesn't delay transactions (AC-07)."""
+        others = [n for n in names if n not in plans]
+        rest = asyncio.ensure_future(load(principal, others))
+        try:
+            d = await load(principal, plans)
+        except BaseException:
+            rest.cancel()
+            raise
         start, end = views.transaction_window((d[p].rows for p in plans), month)
         bounds: dict[str, str | list[str]] = {}
         if start is not None:
             bounds["transaction_date_from"] = start.isoformat()
         if end is not None:
             bounds["transaction_date_to"] = end.isoformat()
-        d.update(await load(principal, ["transactions"], {"transactions": bounds}))
+        tx = load(principal, ["transactions"], {"transactions": bounds})
+        for part in await asyncio.gather(tx, rest):
+            d.update(part)
         return d
 
     def section(
