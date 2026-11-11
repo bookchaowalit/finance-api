@@ -503,3 +503,28 @@ def test_waiting_for_an_upstream_slot_counts_against_the_timeout():
         return "no error"
 
     assert _asyncio.run(_asyncio.wait_for(run(), 2)) == "timeout"
+
+
+def test_slot_wait_and_cell_call_share_one_deadline():
+    """AC-04: time spent waiting for a slot is taken off the cell call's timeout."""
+    import asyncio as _asyncio
+
+    sent: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.extensions["timeout"]["read"])
+        return httpx.Response(200, json={"items": []})
+
+    client = CellClient(
+        CELLS, transport=httpx.MockTransport(handler), timeout=1.0, max_inflight=1
+    )
+
+    async def run() -> None:
+        await client._inflight.acquire()
+        _asyncio.get_running_loop().call_later(0.3, client._inflight.release)
+        async with client.session() as http:
+            await client.list_all(http, "tax", "tax-items", "t")
+
+    _asyncio.run(run())
+    (left,) = sent
+    assert 0 < left <= 0.75

@@ -100,15 +100,22 @@ class CellClient:
             )
             # Waiting for a slot counts against the timeout too, so busy or slow cells can't
             # hold this request past it (AC-04).
+            # One deadline per cell request: the slot wait and the call share the timeout.
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + self.timeout
             try:
                 await asyncio.wait_for(self._inflight.acquire(), self.timeout)
             except TimeoutError as exc:
                 raise CellError("timeout") from exc
             try:
+                left = deadline - loop.time()
+                if left <= 0:
+                    raise CellError("timeout")
                 response = await http.get(
                     f"{self.urls[cell]}/v1/{plural}",
                     params=params,
                     headers={"Authorization": f"Bearer {bearer}"},
+                    timeout=left,
                 )
             except httpx.TimeoutException as exc:
                 raise CellError("timeout") from exc
