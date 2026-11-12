@@ -662,3 +662,49 @@ def test_a_failing_source_cancels_the_transactions_read(cells, monkeypatch):
 
     _asyncio.run(run())
     assert finished == []
+
+
+def test_a_page_too_big_for_the_gateway_is_read_in_smaller_pages():
+    """The gateway refuses an upstream response over 1 MiB (502): halve the page and go on."""
+    import asyncio as _asyncio
+
+    limits: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        limit = int(request.url.params["limit"])
+        after = int(request.url.params["after_id"])
+        limits.append(limit)
+        if limit > 250:
+            return httpx.Response(502, json={"error": "upstream response too large"})
+        ids = list(range(after + 1, 601))[:limit]
+        return httpx.Response(200, json={"items": [{"id": i} for i in ids]})
+
+    client = CellClient(CELLS, transport=httpx.MockTransport(handler), timeout=2.0)
+
+    async def run() -> tuple[list[dict[str, Any]], bool]:
+        async with client.session() as http:
+            return await client.list_all(http, "transactions", "transactions", "t")
+
+    rows, truncated = _asyncio.run(run())
+    assert [r["id"] for r in rows] == list(range(1, 601))
+    assert not truncated
+    assert limits[:3] == [1000, 500, 250]  # then it stays at the size that fit
+
+
+def test_a_502_at_one_row_is_still_a_cell_error():
+    import asyncio as _asyncio
+
+    from finance_api.cells import CellError
+
+    client = CellClient(
+        CELLS,
+        transport=httpx.MockTransport(lambda _r: httpx.Response(502)),
+        timeout=2.0,
+    )
+
+    async def run() -> None:
+        async with client.session() as http:
+            await client.list_all(http, "tax", "tax-items", "t")
+
+    with pytest.raises(CellError, match="cell_error"):
+        _asyncio.run(run())

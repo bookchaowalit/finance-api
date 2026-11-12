@@ -6,7 +6,7 @@ Standard: ADR-0004 — TDD + SDD. Phase 4 of the finance SaaS plan (2026-11-11).
 
 | Field | Value |
 |---|---|
-| Spec ID / version | SPEC-001 / 1.1 |
+| Spec ID / version | SPEC-001 / 1.2 |
 | Status | approved (2026-11-11, see Approval) |
 | Repository / path | bookchaowalit/finance-api / `specs/001-finance-bff/spec.md` |
 | Owner (maker) | Claude Code (implementer session, 2026-11-11) |
@@ -83,6 +83,7 @@ Standard: ADR-0004 — TDD + SDD. Phase 4 of the finance SaaS plan (2026-11-11).
 |---|---|---|---|
 | 1.0 | 2026-11-11 | first version | owner, chat 2026-11-11 |
 | 1.1 | 2026-11-11 | Phase 5: finance-api checks the edge gateway assertion on its own routes (`gateway.py`, byte-identical copy of platform-notifications-api except `SYSTEM = "finance-api"` and the logger; `GATEWAY_ASSERTION_MODE`/`_KEY` set by the gateway owner, off until then). Tests copied with the module (no separate red run); green: 75 passed, coverage 96%. | owner, chat 2026-11-11 ("เริ่มระยะ 5") |
+| 1.2 | 2026-11-12 | Codex review: a budget or cash-flow plan counts only transactions of its own `scope` (personal vs business); a page the gateway refuses as too large (502, 1 MiB cap) is read again in halves and the rest of the read keeps that size (a 502 at one row stays `cell_error`); `gateway.py` synced to the reference's v2 (open `/healthz`, `/ready`, a trailing slash; a stalled body gets 408). Red: `test_plans_count_only_transactions_of_their_own_scope`, `test_a_page_too_big_for_the_gateway_is_read_in_smaller_pages` (and the two copied gateway tests on the old module); green: 126 passed, coverage 95%. | owner, chat 2026-11-11 |
 
 ## Approval
 

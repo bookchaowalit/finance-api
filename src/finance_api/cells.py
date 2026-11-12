@@ -142,9 +142,10 @@ class CellClient:
         cap = self.page_cap if page_cap is None else page_cap
         rows: list[dict[str, Any]] = []
         after = 0
+        size = PAGE_SIZE
         while True:
             # One more than still fits, to tell "exactly the cap" from "more than the cap".
-            limit = min(PAGE_SIZE, cap - len(rows) + 1)
+            limit = min(size, cap - len(rows) + 1)
             params: list[tuple[str, str | int | float | bool | None]] = [
                 ("limit", str(limit)),
                 ("after_id", str(after)),
@@ -159,6 +160,11 @@ class CellClient:
             )
             if response.status_code in (401, 403):
                 raise CellError("forbidden")
+            if response.status_code == 502 and limit > 1:
+                # The gateway refuses an upstream body over its cap (1 MiB): the same page in
+                # halves, and the rest of the read keeps the size that fitted.
+                size = max(1, limit // 2)
+                continue
             if response.status_code != 200:
                 raise CellError("cell_error")
             try:

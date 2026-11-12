@@ -109,6 +109,7 @@ def _flows(
     end: date | None,
     category: str | None = None,
     currency: str | None = None,
+    scope: str | None = None,
 ) -> tuple[defaultdict[str, Decimal], defaultdict[str, Decimal], Counter[str]]:
     income: defaultdict[str, Decimal] = defaultdict(Decimal)
     expense: defaultdict[str, Decimal] = defaultdict(Decimal)
@@ -120,6 +121,8 @@ def _flows(
             continue
         if currency is not None and str(t.get("currency") or "THB") != currency:
             continue
+        if scope is not None and t.get("scope") != scope:
+            continue  # a plan counts only its own scope (personal vs business)
         kind = str(t.get("transaction_type"))
         if kind in INFLOW:
             _add(income, t, "amount")
@@ -155,6 +158,7 @@ def budgets(
             _day(plan.get("period_end")),
             plan.get("category") or None,
             currency,
+            plan.get("scope") or None,
         )
         planned = _amount(plan.get("planned_amount"))
         used = spent.get(currency, Decimal(0))
@@ -188,6 +192,7 @@ def cash_flow(
             _day(plan.get("period_start")),
             _day(plan.get("period_end")),
             currency=currency,
+            scope=plan.get("scope") or None,
         )
         inflow, outflow = (
             _amount(plan.get("expected_inflow")),

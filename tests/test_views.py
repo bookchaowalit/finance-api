@@ -248,3 +248,36 @@ def test_an_open_ended_plan_leaves_that_side_open():  # SPEC-002 AC-03
         date(2026, 11, 1),
         None,
     )
+
+
+def test_plans_count_only_transactions_of_their_own_scope():
+    """A personal plan never counts business transactions (and the other way round)."""
+    budget = {
+        "id": 1,
+        "category": None,
+        "period_start": "2026-11-01",
+        "period_end": "2026-11-30",
+        "planned_amount": "100.0000",
+        "currency": "THB",
+        "status": "active",
+        "scope": "personal",
+    }
+    cash = {
+        "id": 2,
+        "period_start": "2026-11-01",
+        "period_end": "2026-11-30",
+        "expected_inflow": "0.0000",
+        "expected_outflow": "0.0000",
+        "currency": "THB",
+        "status": "active",
+        "scope": "business",
+    }
+    rows = [
+        tx("2026-11-05", "expense", "10.0000", scope="personal"),
+        tx("2026-11-06", "expense", "80.0000", scope="business"),
+        tx("2026-11-07", "income", "5.0000", scope="business"),
+    ]
+    (line,) = views.budgets([budget], rows, "2026-11")
+    assert line["spent"] == "10.0000"
+    (flow,) = views.cash_flow([cash], rows, "2026-11")
+    assert (flow["actual_inflow"], flow["actual_outflow"]) == ("5.0000", "80.0000")
