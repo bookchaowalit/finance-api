@@ -297,6 +297,8 @@ class Credits:
             key=f"topup:{workspace}:{key}",
             json={"account_id": account["id"], "amount": amount},
         )
+        if response.status_code == 409:  # same key, another amount
+            raise KeyUsed()
         body = self._body(response, 200, 201)
         return {
             "status_code": response.status_code,

@@ -731,3 +731,30 @@ def test_a_502_at_one_row_is_still_a_cell_error():
 
     with pytest.raises(CellError, match="cell_error"):
         _asyncio.run(run())
+
+
+def test_a_month_view_answers_inside_one_view_deadline(cells):
+    """Slow plans then slow transactions must not add up past the gateway's 30 s: one deadline
+    covers the whole view, and a source still out at the end is a section error."""
+    import asyncio as _asyncio
+    import time as _time
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host.split(".")[0]
+        if host in ("budgets", "transactions"):
+            await _asyncio.sleep(0.5)
+        return cells.handler(request)
+
+    app = create_app(
+        TokenVerifier(PUBLIC, ISSUER, "finance-api"),
+        CellClient(CELLS, transport=httpx.MockTransport(handler), timeout=0.8),
+        view_deadline=0.7,
+    )
+    t0 = _time.monotonic()
+    r = TestClient(app).get(
+        "/v1/budget-vs-actual", params={"month": "2026-11"}, headers=auth()
+    )
+    took = _time.monotonic() - t0
+    assert r.status_code == 200
+    assert r.json()["budgets"] == {"ok": False, "error": "timeout"}
+    assert took < 0.95  # not 0.5 + 0.5 in a row

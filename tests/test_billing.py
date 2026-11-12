@@ -47,6 +47,7 @@ class Fake:
         self.price: dict[str, Any] | None = {"unit": "month", "unit_price": 19_900}
         self.holds: list[dict[str, Any]] = []
         self.keys: dict[tuple[str, str], dict[str, Any]] = {}
+        self.topups: dict[tuple[str, str], dict[str, Any]] = {}
         self.calls: list[tuple[str, str]] = []
         self.down = False
         self.fail_capture = 0
@@ -158,18 +159,24 @@ class Fake:
                 self.holds.append(hold)
             return httpx.Response(200, json=hold)
         if path == "/v1/topups":
-            return httpx.Response(
-                201,
-                json={
-                    "id": str(uuid.uuid4()),
-                    "account_id": body["account_id"],
-                    "amount": body["amount"],
-                    "currency": "THB",
-                    "status": "pending",
-                    "payment_status": "open",
-                    "checkout_url": URL,
-                },
-            )
+            # As platform-credits: 2 000..10 000 000 units, one amount per key (else 409).
+            if not 2_000 <= body["amount"] <= 10_000_000:
+                return httpx.Response(422, json={"error": "invalid_amount"})
+            tkey = ("topup", request.headers["idempotency-key"])
+            if tkey in self.topups:
+                if self.topups[tkey]["amount"] != body["amount"]:
+                    return httpx.Response(409, json={"error": "idempotency_conflict"})
+                return httpx.Response(200, json=self.topups[tkey])
+            self.topups[tkey] = {
+                "id": str(uuid.uuid4()),
+                "account_id": body["account_id"],
+                "amount": body["amount"],
+                "currency": "THB",
+                "status": "pending",
+                "payment_status": "open",
+                "checkout_url": URL,
+            }
+            return httpx.Response(201, json=self.topups[tkey])
         raise AssertionError(f"unexpected {request.method} {path}")
 
 
@@ -354,7 +361,7 @@ def test_topups_return_the_checkout_once_and_never_log_it(fake, caplog):
     assert any(
         e["event"] == "finance-api.topup" and e["amount"] == 50_000 for e in events
     )
-    for amount in (999, 10_000_001):
+    for amount in (1_999, 10_000_001):
         assert (
             client.post(
                 "/v1/billing/topups", headers=headers | key(), json={"amount": amount}
@@ -574,3 +581,49 @@ def test_the_longest_accepted_key_still_fits_the_credits_header(fake):
     )
     assert too_long.status_code == 400
     assert too_long.json()["detail"] == {"error": "idempotency_key_required"}
+
+
+def test_topups_start_at_the_credits_minimum(fake):
+    """platform-credits refuses top-ups under 2 000 units (20 THB): refuse them here as 422."""
+    client, _ = make(fake)
+    headers, _, _ = caller()
+    for amount, status in ((1_999, 422), (2_000, 201)):
+        r = client.post(
+            "/v1/billing/topups",
+            headers=headers | key(f"min-{amount}"),
+            json={"amount": amount},
+        )
+        assert r.status_code == status, r.text
+
+
+def test_a_topup_key_reused_for_another_amount_is_409(fake):
+    client, _ = make(fake)
+    headers, _, _ = caller()
+    first = client.post(
+        "/v1/billing/topups", headers=headers | key("top-same"), json={"amount": 5_000}
+    )
+    assert first.status_code == 201, first.text
+    other = client.post(
+        "/v1/billing/topups", headers=headers | key("top-same"), json={"amount": 6_000}
+    )
+    assert other.status_code == 409, other.text
+    assert other.json()["detail"] == {"error": "idempotency_key_used"}
+
+
+def test_a_member_who_lost_access_cannot_spend(fake):
+    """Credits trust finance-api's service token, so finance-api asks a cell first whether the
+    caller is still a member (the cells check the platform on every call)."""
+    cells = Cells()
+    cells.handler = lambda request: httpx.Response(403, json={"error": "forbidden"})
+    client, _ = make(fake, cells=cells)
+    headers, ws, _ = caller()
+    fund(fake, ws, 100_000)
+    for path, body in (
+        ("/v1/billing/pass", {"months": 1}),
+        ("/v1/billing/topups", {"amount": 5_000}),
+    ):
+        r = client.post(path, headers=headers | key(f"gone-{path[-4:]}"), json=body)
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == {"error": "not_a_member"}
+    assert fake.accounts[f"finance:{ws}"]["available"] == 100_000
+    assert not any(p.endswith(("/v1/holds", "/v1/topups")) for _, p in fake.calls)

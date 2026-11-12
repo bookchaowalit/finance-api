@@ -7,7 +7,7 @@ Standard: ADR-0004 — TDD + SDD. Phase 6 (SaaS layer), billing part. Depends on
 
 | Field | Value |
 |---|---|
-| Spec ID / version | SPEC-005 / 1.1 |
+| Spec ID / version | SPEC-005 / 1.2 |
 | Status | approved (2026-11-11, see Approval) |
 | Repository / path | bookchaowalit/finance-api / `specs/005-monthly-pass/spec.md` |
 | Owner (maker) | Claude Code (session "ระบบบัญชีหลังบ้าน", 2026-11-11) |
@@ -45,7 +45,7 @@ Standard: ADR-0004 — TDD + SDD. Phase 6 (SaaS layer), billing part. Depends on
 | ID | Given / When / Then |
 |---|---|
 | AC-01 | **Given** a valid token, **when** `GET /v1/billing`, **then** 200 `{"mode", "pass": {"active", "expires_at"}, "balance": {"available", "currency"}, "price": {"unit_price", "unit"} or null}`; with mode `off` → `{"mode": "off"}` and credits is not called. |
-| AC-02 | **When** `POST /v1/billing/topups {"amount"}` (1 000 – 10 000 000 units) with `Idempotency-Key` (8–80 chars, so the namespaced key fits platform-credits' 128), **then** a credits top-up for the workspace's account; 201/200 `{"id", "amount", "currency", "status", "checkout_url"}` with `Cache-Control: no-store`; the checkout URL is never logged. |
+| AC-02 | **When** `POST /v1/billing/topups {"amount"}` (2 000 – 10 000 000 units, platform-credits' bounds) with `Idempotency-Key` (8–80 chars, so the namespaced key fits platform-credits' 128), **then** a credits top-up for the workspace's account; 201/200 `{"id", "amount", "currency", "status", "checkout_url"}` with `Cache-Control: no-store`; the checkout URL is never logged. The same key with another amount → 409 `idempotency_key_used`. Before any spend (pass or top-up) a cell read with the caller's token confirms the caller is a member now (credits trust finance-api's service token): 403 `not_a_member`, or 503 when the cell cannot tell. |
 | AC-03 | **When** `POST /v1/billing/pass {"months": 1-12}` with `Idempotency-Key`, **then** hold + capture of `months` units of `finance-pass` (credits key `pass:<actor>:<key>`, so a retry never charges twice) and 200 with the new pass state. Not enough credits → 402 `{"error": "insufficient_credits", "available", "required"}`; no active price → 409 `pass_not_for_sale`. A key whose hold expired or was released (credits gave the units back) or that was used for another number of months → 409 `idempotency_key_used`: use a new key per purchase. A replay of a finished purchase answers 200 and charges nothing. Any member of the workspace may buy with their own token; a delegated token (an agent acting for someone: any of the `del`, `obo`, `act` claims) is refused on the pass and top-up routes (403 `delegated_token_refused`, nothing charged). A billing role (who in a workspace may spend) needs a platform permission and is a later decision. |
 | AC-04 | **Given** mode `enforce` and no current pass, **then** `/v1/overview`, `/v1/budget-vs-actual`, `/v1/net-worth` answer 402 `{"error": "pass_required"}` before any cell is called. Mode `shadow` answers as usual and logs `finance-api.pass_missing`. Billing routes, `/v1/export` and `/v1/erase` are never gated (PDPA rights do not depend on payment). |
 | AC-05 | **Given** credits or identity cannot answer, **then** the billing routes answer 503 `billing_unavailable` (`Retry-After: 30`) and the gate lets the request through and logs `finance-api.pass_unknown` (fail open: a paying customer is not locked out by our outage). |
@@ -73,3 +73,4 @@ Standard: ADR-0004 — TDD + SDD. Phase 6 (SaaS layer), billing part. Depends on
 |---|---|---|---|
 | 1.0 | 2026-11-11 | first version | owner, chat 2026-11-11 |
 | 1.1 | 2026-11-12 | Codex review: `Idempotency-Key` is 8–80 characters, so with the `topup:<workspace>:` / `pass:<actor>:` namespace it fits platform-credits' 128 (a 100-character key became a 400 there, shown as 503). Red: `test_the_longest_accepted_key_still_fits_the_credits_header`; green: 130 passed. | owner, chat 2026-11-11 |
+| 1.2 | 2026-11-12 | Codex review: top-ups start at 2 000 units (credits' minimum; 1 000–1 999 became 503); a top-up key reused for another amount is 409 `idempotency_key_used` (was 503); before spending, a cell read with the caller's token confirms current membership (a removed member's unexpired token could spend). Red: `test_topups_start_at_the_credits_minimum`, `test_a_topup_key_reused_for_another_amount_is_409`, `test_a_member_who_lost_access_cannot_spend` (the fake credits now enforce credits' bounds and key rule); green: 134 passed, coverage 95%. | owner, chat 2026-11-11 |

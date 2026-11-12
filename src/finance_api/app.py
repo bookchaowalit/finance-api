@@ -72,9 +72,10 @@ ERASE_STAGES: list[list[tuple[str, str]]] = [
     [("finance-accounts", "accounts")],
 ]
 EXPORT_CAP = 20_000  # records per resource
-EXPORT_DEADLINE = (
-    25.0  # seconds; the edge gateway gives up at 30 (GATEWAY_UPSTREAM_TIMEOUT_SECONDS)
-)
+# Seconds; the edge gateway gives up at 30 (GATEWAY_UPSTREAM_TIMEOUT_SECONDS). A whole view (plans,
+# then transactions) and an export each end inside it.
+VIEW_DEADLINE = 25.0
+EXPORT_DEADLINE = 25.0
 
 
 class EraseBody(BaseModel):
@@ -89,7 +90,9 @@ class PassBody(BaseModel):
 
 class TopupBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    amount: int = Field(ge=1_000, le=10_000_000, strict=True)
+    amount: int = Field(
+        ge=2_000, le=10_000_000, strict=True
+    )  # platform-credits' bounds
 
 
 def _key(cell: str, plural: str) -> str:
@@ -182,6 +185,7 @@ def create_app(
     erase_budget: float = 25.0,  # under the gateway's 30 s; the caller repeats the erase
     erase_pause: float = 3.0,
     export_deadline: float = EXPORT_DEADLINE,
+    view_deadline: float = VIEW_DEADLINE,
     billing: billing_mod.Billing | None = None,
     entitlement_subject: uuid.UUID | None = None,
 ) -> FastAPI:
@@ -253,6 +257,21 @@ def create_app(
                 status_code=403, detail={"error": "delegated_token_refused"}
             )
 
+    async def member_now(principal: Principal) -> None:
+        """Credits trust finance-api's service token, not the caller: before spending, ask a cell
+        (which checks the platform on every call) whether the caller is still a member now."""
+        async with cells.session() as http:
+            try:
+                await cells.list_all(
+                    http, "finance-accounts", "accounts", principal.token, page_cap=1
+                )
+            except CellError as exc:
+                if exc.kind == "forbidden":
+                    raise HTTPException(
+                        status_code=403, detail={"error": "not_a_member"}
+                    ) from exc
+                raise unavailable() from exc
+
     def idempotency(key: str | None) -> str:
         # 80: with the "topup:<workspace>:" / "pass:<actor>:" namespace (43 / 42 chars) the key
         # still fits platform-credits' 128-character Idempotency-Key.
@@ -284,20 +303,31 @@ def create_app(
             )
         )
 
+    def view_ends() -> float:
+        return asyncio.get_running_loop().time() + view_deadline
+
     async def load(
         principal: Principal,
         names: list[str],
         extra: dict[str, dict[str, str | list[str]]] | None = None,
+        *,
+        deadline: float | None = None,
     ) -> dict[str, Loaded]:
+        """Each source, or why it is missing; ``deadline`` (loop time) bounds them all."""
+        ends = view_ends() if deadline is None else deadline
         async with cells.session() as http:
 
             async def one(name: str) -> Loaded:
                 cell, plural, filters = SOURCES[name]
                 filters = {**filters, **(extra or {}).get(name, {})}
+                left = ends - asyncio.get_running_loop().time()
                 try:
-                    rows, truncated = await cells.list_all(
-                        http, cell, plural, principal.token, filters
+                    rows, truncated = await asyncio.wait_for(
+                        cells.list_all(http, cell, plural, principal.token, filters),
+                        max(0.0, left),
                     )
+                except TimeoutError:
+                    return Loaded(None, False, "timeout")
                 except CellError as exc:
                     return Loaded(None, False, exc.kind)
                 return Loaded(rows, truncated, None)
@@ -311,10 +341,12 @@ def create_app(
         """The plans first, then only the transactions they need (SPEC-002); the other
         ``names`` load alongside, so a slow unrelated cell doesn't delay transactions (AC-07)."""
         others = [n for n in names if n not in plans]
-        rest = asyncio.ensure_future(load(principal, others))
+        # One deadline for the whole view: the transactions read gets what the plans left.
+        ends = view_ends()
+        rest = asyncio.ensure_future(load(principal, others, deadline=ends))
         tasks = [rest]
         try:
-            d = await load(principal, plans)
+            d = await load(principal, plans, deadline=ends)
             start, end = views.transaction_window((d[p].rows for p in plans), month)
             bounds: dict[str, str | list[str]] = {}
             if start is not None:
@@ -322,7 +354,9 @@ def create_app(
             if end is not None:
                 bounds["transaction_date_to"] = end.isoformat()
             tx = asyncio.ensure_future(
-                load(principal, ["transactions"], {"transactions": bounds})
+                load(
+                    principal, ["transactions"], {"transactions": bounds}, deadline=ends
+                )
             )
             tasks.append(tx)
             for part in await asyncio.gather(tx, rest):
@@ -624,6 +658,7 @@ def create_app(
             """SPEC-005 AC-03."""
             spender(principal)
             key = idempotency(idempotency_key)
+            await member_now(principal)
             try:
                 state, charged = await credits.buy(
                     principal.workspace, principal.actor, payload.months, key
@@ -664,8 +699,13 @@ def create_app(
             """SPEC-005 AC-02: the checkout URL goes to the caller only, never to a log."""
             spender(principal)
             key = idempotency(idempotency_key)
+            await member_now(principal)
             try:
                 order = await credits.topup(principal.workspace, payload.amount, key)
+            except billing_mod.KeyUsed as exc:
+                raise HTTPException(
+                    status_code=409, detail={"error": "idempotency_key_used"}
+                ) from exc
             except billing_mod.Unavailable as exc:
                 raise unavailable() from exc
             audit("finance-api.topup", principal, amount=payload.amount)
