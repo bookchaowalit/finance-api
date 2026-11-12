@@ -374,3 +374,15 @@ def test_audit_lines_name_who_and_what_without_content(client, cells, caplog):
     assert all(e["actor"] for e in events.values())
     assert '"name"' not in caplog.text
     assert "Bearer" not in caplog.text
+
+
+def test_export_and_erase_end_before_the_gateway_gives_up():
+    """The edge gateway cuts an upstream call at 30 s (GATEWAY_UPSTREAM_TIMEOUT_SECONDS)."""
+    import inspect
+
+    from finance_api.app import EXPORT_DEADLINE, create_app
+
+    defaults = inspect.signature(create_app).parameters
+    assert EXPORT_DEADLINE < 30
+    assert defaults["export_deadline"].default < 30
+    assert defaults["erase_budget"].default < 30

@@ -556,3 +556,21 @@ def test_delegated_tokens_cannot_spend(fake, claim):
         assert r.json() == {"detail": {"error": "delegated_token_refused"}}
     assert fake.accounts[f"finance:{ws}"]["available"] == 100_000
     assert not any(p.endswith(("/v1/holds", "/v1/topups")) for _, p in fake.calls)
+
+
+def test_the_longest_accepted_key_still_fits_the_credits_header(fake):
+    """platform-credits caps Idempotency-Key at 128; with the pass:/topup: namespace added it fits."""
+    client, _ = make(fake)
+    headers, ws, _ = caller()
+    fund(fake, ws, 100_000)
+    longest = "k" * 80
+    ok = client.post(
+        "/v1/billing/pass", headers=headers | key(longest), json={"months": 1}
+    )
+    assert ok.status_code == 200, ok.text
+    assert all(len(k[1]) <= 128 for k in fake.keys)
+    too_long = client.post(
+        "/v1/billing/pass", headers=headers | key("k" * 81), json={"months": 1}
+    )
+    assert too_long.status_code == 400
+    assert too_long.json()["detail"] == {"error": "idempotency_key_required"}

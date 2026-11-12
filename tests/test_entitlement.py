@@ -155,3 +155,25 @@ def test_the_service_subject_cannot_erase():
     )
     assert r.status_code == 403
     assert r.json() == {"detail": {"error": "service_only"}}
+
+
+def test_the_token_is_checked_off_the_event_loop(monkeypatch):
+    """A JWKS refresh is a blocking HTTP call: verify() must never run on the event loop."""
+    import asyncio
+
+    seen: list[bool] = []
+    real = TokenVerifier.verify
+
+    def spy(self, *args, **kwargs):
+        try:
+            asyncio.get_running_loop()
+            seen.append(True)
+        except RuntimeError:
+            seen.append(False)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(TokenVerifier, "verify", spy)
+    client_for(billing=None).get(
+        "/v1/internal/entitlement", headers=identity_token(uuid.uuid4())
+    )
+    assert seen == [False]

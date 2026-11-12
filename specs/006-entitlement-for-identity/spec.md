@@ -4,7 +4,7 @@ Standard: ADR-0004. Pairs with platform-identity SPEC-005 (the read-only scope c
 
 | Field | Value |
 |---|---|
-| Spec ID / version | SPEC-006 / 1.0 |
+| Spec ID / version | SPEC-006 / 1.1 |
 | Status | approved (owner 2026-11-12: "ทำไปเลย เราอนุมัติทั้งหมดหลังจากนี้") |
 | Repository / path | bookchaowalit/finance-api / `specs/006-entitlement-for-identity/spec.md` |
 | Owner (maker) / reviewer | Claude Code / solo:solo-reviewer + Codex Stop hook + CI |
@@ -27,3 +27,10 @@ the workspace has a current pass.
 
 ## 3. Verification
 `tests/test_entitlement.py`; red first.
+
+## Change log
+
+| Version | Date | Change | Approved by |
+|---|---|---|---|
+| 1.0 | 2026-11-11 | first version | owner, chat 2026-11-11 |
+| 1.1 | 2026-11-12 | Codex review: the entitlement route verifies the token in a worker thread (a JWKS refresh is a blocking HTTP call and stalled the event loop). Red: `test_the_token_is_checked_off_the_event_loop`; green: 130 passed. | owner, chat 2026-11-11 |

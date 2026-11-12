@@ -691,6 +691,29 @@ def test_a_page_too_big_for_the_gateway_is_read_in_smaller_pages():
     assert limits[:3] == [1000, 500, 250]  # then it stays at the size that fit
 
 
+def test_a_cell_that_is_down_is_not_retried_in_smaller_pages():
+    """Only the gateway's "too large" answer shrinks the page: another 502 costs one call."""
+    import asyncio as _asyncio
+
+    from finance_api.cells import CellError
+
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(int(request.url.params["limit"]))
+        return httpx.Response(502, json={"error": "upstream unavailable"})
+
+    client = CellClient(CELLS, transport=httpx.MockTransport(handler), timeout=2.0)
+
+    async def run() -> None:
+        async with client.session() as http:
+            await client.list_all(http, "tax", "tax-items", "t")
+
+    with pytest.raises(CellError, match="cell_error"):
+        _asyncio.run(run())
+    assert calls == [1000]
+
+
 def test_a_502_at_one_row_is_still_a_cell_error():
     import asyncio as _asyncio
 

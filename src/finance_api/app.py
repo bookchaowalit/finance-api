@@ -72,7 +72,9 @@ ERASE_STAGES: list[list[tuple[str, str]]] = [
     [("finance-accounts", "accounts")],
 ]
 EXPORT_CAP = 20_000  # records per resource
-EXPORT_DEADLINE = 70.0  # seconds; Cloudflare gives up at 100
+EXPORT_DEADLINE = (
+    25.0  # seconds; the edge gateway gives up at 30 (GATEWAY_UPSTREAM_TIMEOUT_SECONDS)
+)
 
 
 class EraseBody(BaseModel):
@@ -177,7 +179,7 @@ def create_app(
     *,
     rate_per_minute: int = 12,
     export_cap: int = EXPORT_CAP,
-    erase_budget: float = 60.0,
+    erase_budget: float = 25.0,  # under the gateway's 30 s; the caller repeats the erase
     erase_pause: float = 3.0,
     export_deadline: float = EXPORT_DEADLINE,
     billing: billing_mod.Billing | None = None,
@@ -252,7 +254,9 @@ def create_app(
             )
 
     def idempotency(key: str | None) -> str:
-        if key is None or not re.fullmatch(r"[A-Za-z0-9_.:-]{8,100}", key):
+        # 80: with the "topup:<workspace>:" / "pass:<actor>:" namespace (43 / 42 chars) the key
+        # still fits platform-credits' 128-character Idempotency-Key.
+        if key is None or not re.fullmatch(r"[A-Za-z0-9_.:-]{8,80}", key):
             raise HTTPException(
                 status_code=400, detail={"error": "idempotency_key_required"}
             )
@@ -680,7 +684,10 @@ def create_app(
         ) -> dict[str, Any]:
             """SPEC-006: does the token's workspace have a current pass (asked by identity)."""
             try:
-                principal = verifier.verify(authorization, None)
+                # Off the event loop: a JWKS refresh is a blocking HTTP call.
+                principal = await asyncio.to_thread(
+                    verifier.verify, authorization, None
+                )
             except Unauthenticated as exc:
                 raise HTTPException(
                     status_code=401, detail={"error": "unauthenticated"}

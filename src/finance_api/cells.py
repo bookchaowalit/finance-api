@@ -32,6 +32,19 @@ DEFAULT_CELLS = {
     )
 }
 PAGE_SIZE = 1000  # the cells' MAX_LIMIT
+TOO_LARGE = "upstream response too large"  # platform-api-gateway edge._proxy
+
+
+def _too_large(response: httpx.Response) -> bool:
+    """The gateway's own answer for an upstream body over its response cap."""
+    if response.status_code != 502:
+        return False
+    try:
+        return bool(response.json().get("error") == TOO_LARGE)
+    except (ValueError, AttributeError):
+        return False
+
+
 ERASE_BATCH = 500  # the cells' largest erase batch (SPEC-008)
 
 
@@ -160,9 +173,10 @@ class CellClient:
             )
             if response.status_code in (401, 403):
                 raise CellError("forbidden")
-            if response.status_code == 502 and limit > 1:
+            if limit > 1 and _too_large(response):
                 # The gateway refuses an upstream body over its cap (1 MiB): the same page in
-                # halves, and the rest of the read keeps the size that fitted.
+                # halves, and the rest of the read keeps the size that fitted. Any other 502 (a
+                # cell that is down) is a cell_error at once, never a burst of retries.
                 size = max(1, limit // 2)
                 continue
             if response.status_code != 200:
